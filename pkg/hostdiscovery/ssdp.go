@@ -1,11 +1,15 @@
 // Package hostdiscovery: SSDP/UPnP discovery for IoT and media devices.
 // SSDP (Simple Service Discovery Protocol) is commonly used by:
-//   - Smart TVs (Samsung, LG, etc.)
-//   - Media players (Roku, Apple TV, Fire TV)
-//   - IoT devices (smart home hubs, cameras)
+//   - Smart TVs (Samsung, LG, Sony, etc.)
+//   - Media players (Roku, Apple TV, Fire TV, Chromecast)
+//   - Voice assistants (Google Home, Amazon Alexa/Echo)
+//   - IoT devices (smart home hubs, cameras, thermostats)
 //   - Game consoles (Xbox, PlayStation)
-//   - Network printers
-//   - NAS devices
+//   - Network printers and scanners
+//   - NAS devices (Synology, QNAP)
+//   - Routers and network equipment
+//
+// This implementation uses github.com/koron/go-ssdp for robust SSDP handling.
 package hostdiscovery
 
 import (
@@ -15,29 +19,61 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/koron/go-ssdp"
 )
 
 const (
-	ssdpPort          = 1900
-	ssdpMulticastAddr = "239.255.255.250"
-	ssdpTimeout       = 3 * time.Second
+	ssdpTimeout = 3 * time.Second
+)
+
+// Common SSDP search targets
+const (
+	// SSDPAll searches for all devices and services
+	SSDPAll = ssdp.All // "ssdp:all"
+
+	// SSDPRootDevice searches for UPnP root devices only
+	SSDPRootDevice = ssdp.RootDevice // "upnp:rootdevice"
+
+	// SSDPMediaRenderer searches for media renderers (TVs, speakers)
+	SSDPMediaRenderer = "urn:schemas-upnp-org:device:MediaRenderer:1"
+
+	// SSDPMediaServer searches for media servers (NAS, DLNA servers)
+	SSDPMediaServer = "urn:schemas-upnp-org:device:MediaServer:1"
+
+	// SSDPDialMultiscreen searches for DIAL/Chromecast devices
+	SSDPDialMultiscreen = "urn:dial-multiscreen-org:service:dial:1"
+
+	// SSDPBasicDevice searches for basic UPnP devices
+	SSDPBasicDevice = "urn:schemas-upnp-org:device:Basic:1"
+
+	// SSDPInternetGateway searches for routers/gateways
+	SSDPInternetGateway = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
+
+	// SSDPPrinter searches for UPnP printers
+	SSDPPrinter = "urn:schemas-upnp-org:service:PrintBasic:1"
 )
 
 // SSDPResult contains the result of an SSDP discovery.
 type SSDPResult struct {
 	IP           string
-	Location     string // URL to device description
+	Location     string // URL to device description XML
 	Server       string // Server header (OS/device info)
 	USN          string // Unique Service Name
 	ST           string // Search Target (device type)
+	MaxAge       int    // Cache control max-age
 	FriendlyName string // Parsed from device description if available
+	Manufacturer string // Parsed from device description
+	ModelName    string // Parsed from device description
 	Error        error
 }
 
-// SSDPDiscovery performs SSDP-based device discovery.
+// SSDPDiscovery performs SSDP-based device discovery using koron/go-ssdp.
 type SSDPDiscovery struct {
-	Timeout time.Duration
+	Timeout    time.Duration
+	Interfaces []net.Interface // Specific interfaces to use (nil = all)
 }
 
 // NewSSDPDiscovery creates a new SSDP discovery helper with defaults.
@@ -47,74 +83,99 @@ func NewSSDPDiscovery() *SSDPDiscovery {
 
 // Discover performs SSDP M-SEARCH to find all devices on the network.
 // searchTarget can be:
-//   - "ssdp:all" - All devices
-//   - "upnp:rootdevice" - Root devices only
-//   - "urn:schemas-upnp-org:device:MediaRenderer:1" - Media renderers
-//   - "urn:dial-multiscreen-org:service:dial:1" - DIAL/Chromecast
+//   - SSDPAll ("ssdp:all") - All devices
+//   - SSDPRootDevice ("upnp:rootdevice") - Root devices only
+//   - SSDPMediaRenderer - Smart TVs, speakers, media players
+//   - SSDPMediaServer - NAS, DLNA servers
+//   - SSDPDialMultiscreen - Chromecast, DIAL-enabled devices
+//   - SSDPInternetGateway - Routers
+//   - Custom URN strings
 func (s *SSDPDiscovery) Discover(ctx context.Context, searchTarget string) ([]*SSDPResult, error) {
 	if searchTarget == "" {
-		searchTarget = "ssdp:all"
+		searchTarget = SSDPAll
 	}
 
-	conn, err := net.ListenPacket("udp4", ":0")
-	if err != nil {
-		return nil, fmt.Errorf("udp listen: %w", err)
-	}
-	defer conn.Close()
-
-	deadline := time.Now().Add(s.Timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	_ = conn.SetDeadline(deadline)
-
-	// Build M-SEARCH request
-	request := buildMSearchRequest(searchTarget)
-
-	// Send to multicast address
-	mcastAddr := &net.UDPAddr{IP: net.ParseIP(ssdpMulticastAddr), Port: ssdpPort}
-	if _, err := conn.WriteTo([]byte(request), mcastAddr); err != nil {
-		return nil, fmt.Errorf("send M-SEARCH: %w", err)
+	// Configure interfaces if specified
+	if len(s.Interfaces) > 0 {
+		ssdp.Interfaces = s.Interfaces
+		defer func() { ssdp.Interfaces = nil }()
 	}
 
-	// Collect responses
-	var results []*SSDPResult
-	seen := make(map[string]bool)
-	buf := make([]byte, 4096)
+	// Calculate wait time in seconds (minimum 1)
+	waitSec := int(s.Timeout.Seconds())
+	if waitSec < 1 {
+		waitSec = 1
+	}
 
-	for {
-		n, addr, err := conn.ReadFrom(buf)
+	// Use context for cancellation
+	resultCh := make(chan []ssdp.Service, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		services, err := ssdp.Search(searchTarget, waitSec, "")
 		if err != nil {
-			break // Timeout
+			errCh <- err
+			return
+		}
+		resultCh <- services
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case err := <-errCh:
+		return nil, fmt.Errorf("SSDP search: %w", err)
+	case services := <-resultCh:
+		return s.convertServices(services), nil
+	}
+}
+
+// DiscoverAll performs multiple searches to find various device types.
+// Returns a combined, deduplicated list of all discovered devices.
+func (s *SSDPDiscovery) DiscoverAll(ctx context.Context) ([]*SSDPResult, error) {
+	searchTargets := []string{
+		SSDPAll,
+		SSDPRootDevice,
+		SSDPMediaRenderer,
+		SSDPDialMultiscreen,
+	}
+
+	seen := make(map[string]bool)
+	var results []*SSDPResult
+	var mu sync.Mutex
+
+	for _, st := range searchTargets {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
 		}
 
-		res := parseSSDPResponse(buf[:n])
-		if res == nil {
-			continue
+		found, err := s.Discover(ctx, st)
+		if err != nil {
+			continue // Best effort
 		}
 
-		// Extract IP from sender
-		if udpAddr, ok := addr.(*net.UDPAddr); ok {
-			res.IP = udpAddr.IP.String()
+		mu.Lock()
+		for _, r := range found {
+			key := r.USN
+			if key == "" {
+				key = r.IP + r.Location
+			}
+			if !seen[key] {
+				seen[key] = true
+				results = append(results, r)
+			}
 		}
-
-		// Deduplicate by USN
-		key := res.USN
-		if key == "" {
-			key = res.IP + res.Location
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
-		results = append(results, res)
+		mu.Unlock()
 	}
 
 	return results, nil
 }
 
-// LookupAddr sends unicast M-SEARCH to a specific IP.
+// LookupAddr checks if a specific IP has SSDP-enabled devices.
+// Note: SSDP is typically multicast-based, so this sends a unicast M-SEARCH
+// which may not be supported by all devices.
 func (s *SSDPDiscovery) LookupAddr(ctx context.Context, ip string) (*SSDPResult, error) {
 	res := &SSDPResult{IP: ip}
 
@@ -124,124 +185,216 @@ func (s *SSDPDiscovery) LookupAddr(ctx context.Context, ip string) (*SSDPResult,
 		return res, res.Error
 	}
 
-	conn, err := net.ListenPacket("udp4", ":0")
+	// Do a full discovery and filter by IP
+	results, err := s.Discover(ctx, SSDPAll)
 	if err != nil {
-		res.Error = fmt.Errorf("udp listen: %w", err)
-		return res, res.Error
-	}
-	defer conn.Close()
-
-	deadline := time.Now().Add(s.Timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	_ = conn.SetDeadline(deadline)
-
-	request := buildMSearchRequest("ssdp:all")
-	addr := &net.UDPAddr{IP: parsedIP, Port: ssdpPort}
-	if _, err := conn.WriteTo([]byte(request), addr); err != nil {
-		res.Error = fmt.Errorf("send M-SEARCH: %w", err)
-		return res, res.Error
+		res.Error = err
+		return res, err
 	}
 
-	buf := make([]byte, 4096)
-	n, _, err := conn.ReadFrom(buf)
-	if err != nil {
-		res.Error = fmt.Errorf("read response: %w", err)
-		return res, res.Error
+	for _, r := range results {
+		if r.IP == ip {
+			return r, nil
+		}
 	}
 
-	parsed := parseSSDPResponse(buf[:n])
-	if parsed != nil {
-		res.Location = parsed.Location
-		res.Server = parsed.Server
-		res.USN = parsed.USN
-		res.ST = parsed.ST
+	res.Error = fmt.Errorf("no SSDP response from %s", ip)
+	return res, res.Error
+}
+
+// Monitor starts monitoring for SSDP alive/bye announcements.
+// Returns channels for alive messages, bye messages, and a stop function.
+func (s *SSDPDiscovery) Monitor(ctx context.Context) (<-chan *SSDPResult, <-chan string, error) {
+	aliveCh := make(chan *SSDPResult, 100)
+	byeCh := make(chan string, 100) // USN of device going offline
+
+	monitor := &ssdp.Monitor{
+		Alive: func(m *ssdp.AliveMessage) {
+			result := &SSDPResult{
+				Location: m.Location,
+				Server:   m.Server,
+				USN:      m.USN,
+				ST:       m.Type,
+				MaxAge:   m.MaxAge(),
+			}
+			// Extract IP from sender
+			if m.From != nil {
+				if udpAddr, ok := m.From.(*net.UDPAddr); ok {
+					result.IP = udpAddr.IP.String()
+				} else {
+					host, _, _ := net.SplitHostPort(m.From.String())
+					result.IP = host
+				}
+			}
+			select {
+			case aliveCh <- result:
+			default: // Don't block if channel full
+			}
+		},
+		Bye: func(m *ssdp.ByeMessage) {
+			select {
+			case byeCh <- m.USN:
+			default:
+			}
+		},
 	}
 
-	return res, nil
+	if err := monitor.Start(); err != nil {
+		close(aliveCh)
+		close(byeCh)
+		return nil, nil, fmt.Errorf("start monitor: %w", err)
+	}
+
+	// Handle context cancellation
+	go func() {
+		<-ctx.Done()
+		monitor.Close()
+		close(aliveCh)
+		close(byeCh)
+	}()
+
+	return aliveCh, byeCh, nil
 }
 
 // GetDeviceInfo fetches and parses the device description XML from the Location URL.
-// Returns a friendly name if found.
-func (s *SSDPDiscovery) GetDeviceInfo(ctx context.Context, locationURL string) (string, error) {
+// Returns detailed device information including friendly name, manufacturer, model.
+func (s *SSDPDiscovery) GetDeviceInfo(ctx context.Context, locationURL string) (*SSDPResult, error) {
 	if locationURL == "" {
-		return "", fmt.Errorf("no location URL")
+		return nil, fmt.Errorf("no location URL")
 	}
 
 	client := &http.Client{Timeout: s.Timeout}
 	req, err := http.NewRequestWithContext(ctx, "GET", locationURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Simple XML parsing: look for <friendlyName>...</friendlyName>
+	result := &SSDPResult{Location: locationURL}
+
+	// Simple XML parsing: look for key elements
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.Contains(line, "<friendlyName>") {
-			start := strings.Index(line, "<friendlyName>") + len("<friendlyName>")
-			end := strings.Index(line, "</friendlyName>")
-			if start > 0 && end > start {
-				return strings.TrimSpace(line[start:end]), nil
+
+		if name := extractXMLValue(line, "friendlyName"); name != "" {
+			result.FriendlyName = name
+		}
+		if mfr := extractXMLValue(line, "manufacturer"); mfr != "" {
+			result.Manufacturer = mfr
+		}
+		if model := extractXMLValue(line, "modelName"); model != "" {
+			result.ModelName = model
+		}
+	}
+
+	return result, nil
+}
+
+// EnrichResults fetches device info for each result's Location URL.
+// This populates FriendlyName, Manufacturer, and ModelName fields.
+func (s *SSDPDiscovery) EnrichResults(ctx context.Context, results []*SSDPResult) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // Limit concurrent requests
+
+	for _, r := range results {
+		if r.Location == "" {
+			continue
+		}
+
+		wg.Add(1)
+		go func(result *SSDPResult) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
 			}
-		}
+
+			info, err := s.GetDeviceInfo(ctx, result.Location)
+			if err == nil && info != nil {
+				result.FriendlyName = info.FriendlyName
+				result.Manufacturer = info.Manufacturer
+				result.ModelName = info.ModelName
+			}
+		}(r)
 	}
 
-	return "", nil
+	wg.Wait()
 }
 
-func buildMSearchRequest(searchTarget string) string {
-	return fmt.Sprintf("M-SEARCH * HTTP/1.1\r\n"+
-		"HOST: %s:%d\r\n"+
-		"MAN: \"ssdp:discover\"\r\n"+
-		"MX: 2\r\n"+
-		"ST: %s\r\n"+
-		"USER-AGENT: go-hostdiscovery/1.0\r\n"+
-		"\r\n",
-		ssdpMulticastAddr, ssdpPort, searchTarget)
+// convertServices converts go-ssdp Service slice to our SSDPResult slice
+func (s *SSDPDiscovery) convertServices(services []ssdp.Service) []*SSDPResult {
+	results := make([]*SSDPResult, 0, len(services))
+
+	for _, svc := range services {
+		result := &SSDPResult{
+			Location: svc.Location,
+			Server:   svc.Server,
+			USN:      svc.USN,
+			ST:       svc.Type,
+			MaxAge:   svc.MaxAge(),
+		}
+
+		// Extract IP from Location URL
+		if svc.Location != "" {
+			result.IP = extractIPFromURL(svc.Location)
+		}
+
+		results = append(results, result)
+	}
+
+	return results
 }
 
-func parseSSDPResponse(data []byte) *SSDPResult {
-	lines := strings.Split(string(data), "\r\n")
-	if len(lines) < 2 {
-		return nil
+// extractIPFromURL extracts the IP address from a URL like "http://192.168.1.1:8080/desc.xml"
+func extractIPFromURL(url string) string {
+	// Remove scheme
+	url = strings.TrimPrefix(url, "http://")
+	url = strings.TrimPrefix(url, "https://")
+
+	// Get host:port part
+	if idx := strings.Index(url, "/"); idx > 0 {
+		url = url[:idx]
 	}
 
-	// Check for HTTP response
-	if !strings.HasPrefix(lines[0], "HTTP/") {
-		return nil
+	// Remove port
+	host, _, err := net.SplitHostPort(url)
+	if err != nil {
+		// No port, try as-is
+		host = url
 	}
 
-	res := &SSDPResult{}
-	for _, line := range lines[1:] {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToUpper(strings.TrimSpace(parts[0]))
-		value := strings.TrimSpace(parts[1])
-
-		switch key {
-		case "LOCATION":
-			res.Location = value
-		case "SERVER":
-			res.Server = value
-		case "USN":
-			res.USN = value
-		case "ST":
-			res.ST = value
-		}
+	// Validate it's an IP
+	if ip := net.ParseIP(host); ip != nil {
+		return host
 	}
 
-	return res
+	return ""
+}
+
+// extractXMLValue extracts the value from a simple XML tag like <tagName>value</tagName>
+func extractXMLValue(line, tagName string) string {
+	openTag := "<" + tagName + ">"
+	closeTag := "</" + tagName + ">"
+
+	start := strings.Index(line, openTag)
+	if start < 0 {
+		return ""
+	}
+	start += len(openTag)
+
+	end := strings.Index(line, closeTag)
+	if end < 0 || end <= start {
+		return ""
+	}
+
+	return strings.TrimSpace(line[start:end])
 }
