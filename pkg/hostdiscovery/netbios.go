@@ -56,7 +56,14 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 		return res, fmt.Errorf("invalid IP address: %s", ip)
 	}
 
-	conn, err := net.ListenPacket("udp4", ":0")
+	// Find the best local interface to reach this IP
+	localAddr, err := findLocalAddrFor(parsedIP)
+	if err != nil {
+		// Fallback to any interface
+		localAddr = ""
+	}
+
+	conn, err := net.ListenPacket("udp4", localAddr)
 	if err != nil {
 		return res, fmt.Errorf("udp listen: %w", err)
 	}
@@ -87,6 +94,19 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 		return res, fmt.Errorf("parse response: %w", err)
 	}
 	return res, nil
+}
+
+// findLocalAddrFor finds the best local address to reach a target IP.
+func findLocalAddrFor(targetIP net.IP) (string, error) {
+	// Use a UDP "connection" to determine which local interface would be used
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: 137})
+	if err != nil {
+		return ":0", err
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String() + ":0", nil
 }
 
 // LookupMultiple performs NetBIOS lookups on multiple IPs concurrently.
