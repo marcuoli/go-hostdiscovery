@@ -113,6 +113,8 @@ func (m *MultiDiscovery) DiscoverCIDR(ctx context.Context, cidr string) ([]*Mult
 
 // ResolveBatch performs hostname resolution on a batch of IPs using all enabled protocols.
 func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*MultiDiscoveryResult, error) {
+	debugLog("multi", "ResolveBatch starting for %d IPs", len(ips))
+
 	results := make([]*MultiDiscoveryResult, len(ips))
 	var mu sync.Mutex // Protect concurrent writes to results
 	for i, ip := range ips {
@@ -131,18 +133,24 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			debugLog(MethodDNS, "Starting reverse DNS lookups for %d IPs", len(ips))
 			dns := NewDNSDiscovery()
 			dns.Timeout = m.Options.Timeout
 			dnsResults := dns.LookupMultiple(ctx, ips)
 			mu.Lock()
+			found := 0
 			for i, r := range dnsResults {
 				if r != nil && r.Hostname != "" {
 					results[i].Hostnames[MethodDNS] = r.Hostname
+					found++
+					debugLogVerbose(MethodDNS, "%s -> %s", ips[i], r.Hostname)
 				}
 				if r != nil && r.Error != nil {
 					results[i].Errors[MethodDNS] = r.Error
+					debugLogVerbose(MethodDNS, "%s: error: %v", ips[i], r.Error)
 				}
 			}
+			debugLog(MethodDNS, "Completed: %d/%d hostnames found", found, len(ips))
 			mu.Unlock()
 		}()
 	}
@@ -152,18 +160,25 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			debugLog(MethodNetBIOS, "Starting NetBIOS lookups for %d IPs", len(ips))
 			nb := NewNetBIOSDiscovery()
 			nb.Timeout = m.Options.Timeout
 			nbResults := nb.LookupMultiple(ctx, ips)
 			mu.Lock()
+			found := 0
 			for i, r := range nbResults {
 				if r != nil && r.Hostname != "" {
 					results[i].Hostnames[MethodNetBIOS] = r.Hostname
+					found++
 					if r.MACAddress != "" {
 						results[i].MAC = r.MACAddress
+						debugLogVerbose(MethodNetBIOS, "%s -> %s (MAC: %s)", ips[i], r.Hostname, r.MACAddress)
+					} else {
+						debugLogVerbose(MethodNetBIOS, "%s -> %s", ips[i], r.Hostname)
 					}
 				}
 			}
+			debugLog(MethodNetBIOS, "Completed: %d/%d hostnames found", found, len(ips))
 			mu.Unlock()
 		}()
 	}
@@ -173,18 +188,24 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			debugLog(MethodMDNS, "Starting mDNS lookups for %d IPs", len(ips))
 			mdns := NewMDNSDiscovery()
 			mdns.Timeout = m.Options.Timeout
 			mdnsResults := mdns.LookupMultiple(ctx, ips)
 			mu.Lock()
+			found := 0
 			for i, r := range mdnsResults {
 				if r != nil && r.Hostname != "" {
 					results[i].Hostnames[MethodMDNS] = r.Hostname
+					found++
+					debugLogVerbose(MethodMDNS, "%s -> %s", ips[i], r.Hostname)
 				}
 				if r != nil && r.Error != nil {
 					results[i].Errors[MethodMDNS] = r.Error
+					debugLogVerbose(MethodMDNS, "%s: error: %v", ips[i], r.Error)
 				}
 			}
+			debugLog(MethodMDNS, "Completed: %d/%d hostnames found", found, len(ips))
 			mu.Unlock()
 		}()
 	}
@@ -194,23 +215,30 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			debugLog(MethodLLMNR, "Starting LLMNR lookups for %d IPs", len(ips))
 			llmnr := NewLLMNRDiscovery()
 			llmnr.Timeout = m.Options.Timeout
 			llmnrResults := llmnr.LookupMultiple(ctx, ips)
 			mu.Lock()
+			found := 0
 			for i, r := range llmnrResults {
 				if r != nil && r.Hostname != "" {
 					results[i].Hostnames[MethodLLMNR] = r.Hostname
+					found++
+					debugLogVerbose(MethodLLMNR, "%s -> %s", ips[i], r.Hostname)
 				}
 				if r != nil && r.Error != nil {
 					results[i].Errors[MethodLLMNR] = r.Error
+					debugLogVerbose(MethodLLMNR, "%s: error: %v", ips[i], r.Error)
 				}
 			}
+			debugLog(MethodLLMNR, "Completed: %d/%d hostnames found", found, len(ips))
 			mu.Unlock()
 		}()
 	}
 
 	wg.Wait()
+	debugLog("multi", "ResolveBatch completed for %d IPs", len(ips))
 	return results, nil
 }
 
@@ -227,10 +255,15 @@ func (m *MultiDiscovery) DiscoverSSDP(ctx context.Context) ([]*SSDPResult, error
 
 // Resolve performs hostname resolution on a single IP using all enabled protocols.
 func (m *MultiDiscovery) Resolve(ctx context.Context, ip string) *MultiDiscoveryResult {
+	debugLog("multi", "Resolve starting for %s", ip)
 	results, _ := m.ResolveBatch(ctx, []string{ip})
 	if len(results) > 0 {
-		return results[0]
+		r := results[0]
+		debugLog("multi", "Resolve completed for %s: %d methods succeeded, primary=%q",
+			ip, len(r.Hostnames), r.PrimaryHostname())
+		return r
 	}
+	debugLog("multi", "Resolve completed for %s: no results", ip)
 	return &MultiDiscoveryResult{
 		IP:        ip,
 		Hostnames: make(map[DiscoveryMethod]string),
