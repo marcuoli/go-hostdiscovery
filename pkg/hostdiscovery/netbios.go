@@ -48,6 +48,7 @@ func NewNetBIOSDiscovery() *NetBIOSDiscovery {
 }
 
 // LookupAddr performs a NetBIOS Node Status query (NBSTAT) to a specific IPv4 address.
+// It tries the optimal interface first, then falls back to other interfaces if needed.
 func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSResult, error) {
 	res := &NetBIOSResult{IP: ip}
 
@@ -56,12 +57,27 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 		return res, fmt.Errorf("invalid IP address: %s", ip)
 	}
 
-	// Find the best local interface to reach this IP
-	localAddr, err := findLocalAddrFor(parsedIP)
-	if err != nil {
-		// Fallback to any interface
-		localAddr = ""
+	// Get all candidate local addresses to try
+	localAddrs := getLocalAddrsForSubnet(parsedIP)
+	if len(localAddrs) == 0 {
+		localAddrs = []string{":0"} // fallback to any
 	}
+
+	var lastErr error
+	for _, localAddr := range localAddrs {
+		result, err := n.lookupFromInterface(ctx, parsedIP, localAddr)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+	}
+
+	return res, lastErr
+}
+
+// lookupFromInterface performs the actual NetBIOS lookup from a specific local address.
+func (n *NetBIOSDiscovery) lookupFromInterface(ctx context.Context, targetIP net.IP, localAddr string) (*NetBIOSResult, error) {
+	res := &NetBIOSResult{IP: targetIP.String()}
 
 	conn, err := net.ListenPacket("udp4", localAddr)
 	if err != nil {
@@ -75,7 +91,7 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 	}
 	_ = conn.SetDeadline(deadline)
 
-	addr := &net.UDPAddr{IP: parsedIP, Port: netBIOSPort}
+	addr := &net.UDPAddr{IP: targetIP, Port: netBIOSPort}
 	req := buildNBSTATRequest()
 	if _, err := conn.WriteTo(req, addr); err != nil {
 		return res, fmt.Errorf("send request: %w", err)
@@ -94,6 +110,68 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 		return res, fmt.Errorf("parse response: %w", err)
 	}
 	return res, nil
+}
+
+// getLocalAddrsForSubnet returns all local addresses that are in the same subnet as the target.
+// It prioritizes the "default route" address first, then adds other addresses in the same /24.
+func getLocalAddrsForSubnet(targetIP net.IP) []string {
+	var addrs []string
+	
+	// First, try the OS-determined best route
+	if conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: 137}); err == nil {
+		localAddr := conn.LocalAddr().(*net.UDPAddr)
+		addrs = append(addrs, localAddr.IP.String()+":0")
+		conn.Close()
+	}
+
+	// Get all local interfaces and find ones in the same /24 subnet
+	targetPrefix := targetIP.To4()[:3]
+	
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return addrs
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		
+		ifAddrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		
+		for _, addr := range ifAddrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			
+			// Check if same /24 subnet
+			if ip4[0] == targetPrefix[0] && ip4[1] == targetPrefix[1] && ip4[2] == targetPrefix[2] {
+				localStr := ip4.String() + ":0"
+				// Don't add duplicates
+				found := false
+				for _, a := range addrs {
+					if a == localStr {
+						found = true
+						break
+					}
+				}
+				if !found {
+					addrs = append(addrs, localStr)
+				}
+			}
+		}
+	}
+
+	return addrs
 }
 
 // findLocalAddrFor finds the best local address to reach a target IP.
