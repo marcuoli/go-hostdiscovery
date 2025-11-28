@@ -50,7 +50,8 @@ func NewMDNSDiscovery() *MDNSDiscovery {
 	return &MDNSDiscovery{Timeout: mdnsTimeout}
 }
 
-// LookupAddr queries a specific IP for its mDNS hostname using a unicast query.
+// LookupAddr queries a specific IP for its mDNS hostname.
+// It tries both multicast (for Avahi/Bonjour) and unicast queries.
 func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult, error) {
 	res := &MDNSResult{IP: ip}
 
@@ -60,19 +61,83 @@ func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult,
 		return res, res.Error
 	}
 
-	// Build reverse DNS name for PTR query
-	// e.g., 192.168.1.100 -> 100.1.168.192.in-addr.arpa
 	ip4 := parsedIP.To4()
 	if ip4 == nil {
 		res.Error = fmt.Errorf("IPv6 not supported for mDNS reverse lookup")
 		return res, res.Error
 	}
+
+	// Build reverse DNS name for PTR query
+	// e.g., 192.168.1.100 -> 100.1.168.192.in-addr.arpa
 	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
 
+	// Try multicast first (works with Avahi on Linux, Bonjour on macOS)
+	if hostname := m.queryMulticast(ctx, reverseName, parsedIP); hostname != "" {
+		res.Hostname = hostname
+		return res, nil
+	}
+
+	// Fallback to unicast query directly to the host
+	if hostname := m.queryUnicast(ctx, reverseName, parsedIP); hostname != "" {
+		res.Hostname = hostname
+		return res, nil
+	}
+
+	res.Error = fmt.Errorf("no mDNS response from %s", ip)
+	return res, res.Error
+}
+
+// queryMulticast sends an mDNS query to the multicast address and filters responses by IP.
+func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, targetIP net.IP) string {
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
-		res.Error = fmt.Errorf("udp listen: %w", err)
-		return res, res.Error
+		return ""
+	}
+	defer conn.Close()
+
+	// Use shorter timeout for multicast since we need to wait for responses
+	timeout := m.Timeout
+	if timeout > 2*time.Second {
+		timeout = 2 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline)
+
+	// Send to multicast address
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(mdnsMulticastAddr), Port: mdnsPort}
+	query := buildMDNSQuery(reverseName, 12) // Type PTR = 12
+	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+		return ""
+	}
+
+	// Read responses until timeout, looking for one from our target IP
+	buf := make([]byte, 4096)
+	for {
+		n, from, err := conn.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+
+		// Check if response is from our target IP
+		if udpAddr, ok := from.(*net.UDPAddr); ok {
+			if udpAddr.IP.Equal(targetIP) {
+				if hostname := parseMDNSPTRResponse(buf[:n]); hostname != "" {
+					return strings.TrimSuffix(hostname, ".")
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// queryUnicast sends an mDNS query directly to the target host.
+func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, targetIP net.IP) string {
+	conn, err := net.ListenPacket("udp4", ":0")
+	if err != nil {
+		return ""
 	}
 	defer conn.Close()
 
@@ -83,28 +148,22 @@ func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult,
 	_ = conn.SetDeadline(deadline)
 
 	// Send unicast query directly to the host
-	addr := &net.UDPAddr{IP: parsedIP, Port: mdnsPort}
+	addr := &net.UDPAddr{IP: targetIP, Port: mdnsPort}
 	query := buildMDNSQuery(reverseName, 12) // Type PTR = 12
 	if _, err := conn.WriteTo(query, addr); err != nil {
-		res.Error = fmt.Errorf("send query: %w", err)
-		return res, res.Error
+		return ""
 	}
 
-	// Read response
 	buf := make([]byte, 4096)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
-		res.Error = fmt.Errorf("read response: %w", err)
-		return res, res.Error
+		return ""
 	}
 
-	hostname := parseMDNSPTRResponse(buf[:n])
-	if hostname != "" {
-		// Clean up .local suffix if present for display
-		res.Hostname = strings.TrimSuffix(hostname, ".")
+	if hostname := parseMDNSPTRResponse(buf[:n]); hostname != "" {
+		return strings.TrimSuffix(hostname, ".")
 	}
-
-	return res, nil
+	return ""
 }
 
 // BrowseServices discovers services of a specific type on the local network.

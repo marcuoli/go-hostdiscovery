@@ -42,8 +42,9 @@ func NewLLMNRDiscovery() *LLMNRDiscovery {
 }
 
 // LookupAddr performs a reverse LLMNR lookup for the given IP address.
-// Note: LLMNR primarily resolves names to IPs, not IPs to names.
-// This sends a unicast query to the target asking for its name.
+// LLMNR doesn't natively support reverse lookups, so we use multiple strategies:
+// 1. Multicast PTR query (some implementations respond)
+// 2. Direct unicast query to the host
 func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResult, error) {
 	res := &LLMNRResult{IP: ip}
 
@@ -53,10 +54,79 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 		return res, res.Error
 	}
 
+	ip4 := parsedIP.To4()
+	if ip4 == nil {
+		res.Error = fmt.Errorf("IPv6 not supported")
+		return res, res.Error
+	}
+
+	// Build reverse name for PTR query
+	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
+
+	// Try multicast PTR query first
+	if hostname := l.queryMulticastPTR(ctx, reverseName, parsedIP); hostname != "" {
+		res.Hostname = hostname
+		return res, nil
+	}
+
+	// Try unicast query directly to host
+	if hostname := l.queryUnicast(ctx, parsedIP); hostname != "" {
+		res.Hostname = hostname
+		return res, nil
+	}
+
+	res.Error = fmt.Errorf("no LLMNR response from %s", ip)
+	return res, res.Error
+}
+
+// queryMulticastPTR sends a PTR query to the LLMNR multicast address.
+func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
-		res.Error = fmt.Errorf("udp listen: %w", err)
-		return res, res.Error
+		return ""
+	}
+	defer conn.Close()
+
+	timeout := l.Timeout
+	if timeout > 2*time.Second {
+		timeout = 2 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline)
+
+	// Send PTR query to multicast
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(llmnrMulticastAddr), Port: llmnrPort}
+	query := buildLLMNRQuery(reverseName, 12) // Type PTR
+	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+		return ""
+	}
+
+	buf := make([]byte, 2048)
+	for {
+		n, from, err := conn.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+
+		if udpAddr, ok := from.(*net.UDPAddr); ok {
+			if udpAddr.IP.Equal(targetIP) {
+				if hostname := parseLLMNRResponse(buf[:n]); hostname != "" {
+					return hostname
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// queryUnicast sends a direct query to the host asking for its hostname.
+func (l *LLMNRDiscovery) queryUnicast(ctx context.Context, targetIP net.IP) string {
+	conn, err := net.ListenPacket("udp4", ":0")
+	if err != nil {
+		return ""
 	}
 	defer conn.Close()
 
@@ -66,34 +136,22 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 	}
 	_ = conn.SetDeadline(deadline)
 
-	// Build reverse lookup query (similar to mDNS PTR)
-	ip4 := parsedIP.To4()
-	if ip4 == nil {
-		res.Error = fmt.Errorf("IPv6 not supported")
-		return res, res.Error
-	}
-
-	// Try direct unicast query with "*" wildcard name
-	addr := &net.UDPAddr{IP: parsedIP, Port: llmnrPort}
+	// Try with WPAD name first (commonly responds), then generic names
+	addr := &net.UDPAddr{IP: targetIP, Port: llmnrPort}
+	
+	// Send query - some hosts respond to ANY queries with their name
 	query := buildLLMNRQuery("*", 255) // Type ANY
 	if _, err := conn.WriteTo(query, addr); err != nil {
-		res.Error = fmt.Errorf("send query: %w", err)
-		return res, res.Error
+		return ""
 	}
 
 	buf := make([]byte, 2048)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
-		res.Error = fmt.Errorf("read response: %w", err)
-		return res, res.Error
+		return ""
 	}
 
-	hostname := parseLLMNRResponse(buf[:n])
-	if hostname != "" {
-		res.Hostname = hostname
-	}
-
-	return res, nil
+	return parseLLMNRResponse(buf[:n])
 }
 
 // LookupName resolves a hostname to an IP using LLMNR multicast.

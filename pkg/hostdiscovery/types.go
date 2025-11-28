@@ -25,6 +25,7 @@ const (
 	MethodMDNS    DiscoveryMethod = "mdns"
 	MethodLLMNR   DiscoveryMethod = "llmnr"
 	MethodSSDP    DiscoveryMethod = "ssdp"
+	MethodDHCP    DiscoveryMethod = "dhcp" // DHCP hostname (via DNS or direct)
 )
 
 // HostInfo contains consolidated information about a discovered host.
