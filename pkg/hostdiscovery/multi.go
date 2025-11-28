@@ -22,6 +22,8 @@ type MultiDiscoveryOptions struct {
 	EnableLLMNR bool
 	// EnableSSDP enables SSDP/UPnP discovery (IoT/Media)
 	EnableSSDP bool
+	// EnableARP enables ARP-based MAC address discovery
+	EnableARP bool
 
 	// TCPPorts for TCP scanning (default: 80,443,22,3389)
 	TCPPorts []int
@@ -40,6 +42,7 @@ func DefaultMultiDiscoveryOptions() MultiDiscoveryOptions {
 		EnableMDNS:    true,
 		EnableLLMNR:   true,
 		EnableSSDP:    true,
+		EnableARP:     true,
 		TCPPorts:      []int{80, 443, 22, 3389},
 		Timeout:       2 * time.Second,
 		Workers:       256,
@@ -233,6 +236,33 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 				}
 			}
 			debugLog(MethodLLMNR, "Completed: %d/%d hostnames found", found, len(ips))
+			mu.Unlock()
+		}()
+	}
+
+	// ARP lookups for MAC addresses
+	if m.Options.EnableARP {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			debugLog(MethodARP, "Starting ARP lookups for %d IPs", len(ips))
+			arp := NewARPDiscovery()
+			arp.Timeout = m.Options.Timeout
+			arpResults := arp.LookupMultiple(ctx, ips)
+			mu.Lock()
+			found := 0
+			for i, r := range arpResults {
+				if r != nil && r.MACAddress != "" && results[i].MAC == "" {
+					results[i].MAC = r.MACAddress
+					found++
+					debugLogVerbose(MethodARP, "%s -> MAC: %s", ips[i], r.MACAddress)
+				}
+				if r != nil && r.Error != nil {
+					results[i].Errors[MethodARP] = r.Error
+					debugLogVerbose(MethodARP, "%s: error: %v", ips[i], r.Error)
+				}
+			}
+			debugLog(MethodARP, "Completed: %d/%d MAC addresses found", found, len(ips))
 			mu.Unlock()
 		}()
 	}
