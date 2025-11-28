@@ -116,7 +116,7 @@ func (n *NetBIOSDiscovery) lookupFromInterface(ctx context.Context, targetIP net
 // It prioritizes the "default route" address first, then adds other addresses in the same /24.
 func getLocalAddrsForSubnet(targetIP net.IP) []string {
 	var addrs []string
-	
+
 	// First, try the OS-determined best route
 	if conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: 137}); err == nil {
 		localAddr := conn.LocalAddr().(*net.UDPAddr)
@@ -126,7 +126,7 @@ func getLocalAddrsForSubnet(targetIP net.IP) []string {
 
 	// Get all local interfaces and find ones in the same /24 subnet
 	targetPrefix := targetIP.To4()[:3]
-	
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return addrs
@@ -136,23 +136,23 @@ func getLocalAddrsForSubnet(targetIP net.IP) []string {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		
+
 		ifAddrs, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
-		
+
 		for _, addr := range ifAddrs {
 			ipNet, ok := addr.(*net.IPNet)
 			if !ok {
 				continue
 			}
-			
+
 			ip4 := ipNet.IP.To4()
 			if ip4 == nil {
 				continue
 			}
-			
+
 			// Check if same /24 subnet
 			if ip4[0] == targetPrefix[0] && ip4[1] == targetPrefix[1] && ip4[2] == targetPrefix[2] {
 				localStr := ip4.String() + ":0"
