@@ -50,6 +50,36 @@ Get the module:
 go get github.com/marcuoli/go-hostdiscovery
 ```
 
+### NetBIOS hostname discovery
+
+Use the NetBIOS discovery helper to resolve hostnames via NBSTAT (UDP/137):
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	hd "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
+)
+
+func main() {
+	nb := hd.NewNetBIOSDiscovery()
+	res, err := nb.LookupAddr(context.Background(), "192.168.1.50")
+	if err != nil { panic(err) }
+	fmt.Println("Hostname:", res.Hostname)
+	fmt.Println("MAC:", res.MACAddress)
+	for _, n := range res.Names {
+		fmt.Printf("%-15s <%.2X> group=%v active=%v (%s)\n", n.Name, n.Suffix, n.IsGroup, n.IsActive, n.Type)
+	}
+}
+```
+
+Notes:
+- Requires UDP reachability to port 137 on the target.
+- Works best on Windows networks with NetBIOS enabled.
+- Timeout defaults to 2s; adjust via `NetBIOSDiscovery{Timeout: ...}` if needed.
+
 Flags:
 - `-cidr`: CIDR to scan (required), e.g., `192.168.1.0/24`.
 - `-ports`: Comma-separated TCP ports to probe. Default: `80,443,22,3389`.
