@@ -55,6 +55,7 @@ type MultiDiscoveryResult struct {
 	IsUp      bool
 	Hostnames map[DiscoveryMethod]string
 	MAC       string
+	Vendor    string // MAC vendor/manufacturer name
 	Services  []ServiceInfo
 	Errors    map[DiscoveryMethod]error
 }
@@ -68,6 +69,19 @@ func (r *MultiDiscoveryResult) PrimaryHostname() string {
 		}
 	}
 	return ""
+}
+
+// LookupVendor performs a vendor lookup for the MAC address if available.
+// Updates the Vendor field and returns the vendor name.
+func (r *MultiDiscoveryResult) LookupVendor() string {
+	if r.MAC == "" {
+		return ""
+	}
+	if r.Vendor != "" {
+		return r.Vendor // Already looked up
+	}
+	r.Vendor = LookupVendorName(r.MAC)
+	return r.Vendor
 }
 
 // MultiDiscovery performs comprehensive host discovery using multiple protocols.
@@ -268,6 +282,20 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 	}
 
 	wg.Wait()
+
+	// Perform vendor lookups for all results with MAC addresses
+	debugLog("vendor", "Starting vendor lookups for discovered MACs")
+	vendorFound := 0
+	for _, r := range results {
+		if r.MAC != "" {
+			r.LookupVendor()
+			if r.Vendor != "" {
+				vendorFound++
+			}
+		}
+	}
+	debugLog("vendor", "Vendor lookups completed: %d vendors found", vendorFound)
+
 	debugLog("multi", "ResolveBatch completed for %d IPs", len(ips))
 	return results, nil
 }
