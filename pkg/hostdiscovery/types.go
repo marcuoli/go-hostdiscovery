@@ -25,7 +25,8 @@ const (
 	MethodMDNS    DiscoveryMethod = "mdns"
 	MethodLLMNR   DiscoveryMethod = "llmnr"
 	MethodSSDP    DiscoveryMethod = "ssdp"
-	MethodDHCP    DiscoveryMethod = "dhcp" // DHCP hostname (via DNS or direct)
+	MethodDHCP    DiscoveryMethod = "dhcp"   // DHCP hostname (via DNS or direct)
+	MethodFinger  DiscoveryMethod = "finger" // Finger protocol (RFC 1288)
 )
 
 // HostInfo contains consolidated information about a discovered host.
