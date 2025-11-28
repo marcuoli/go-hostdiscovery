@@ -1,6 +1,13 @@
 # go-hostdiscovery
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/marcuoli/go-hostdiscovery.svg)](https://pkg.go.dev/github.com/marcuoli/go-hostdiscovery)
+[![Go Report Card](https://goreportcard.com/badge/github.com/marcuoli/go-hostdiscovery)](https://goreportcard.com/report/github.com/marcuoli/go-hostdiscovery)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/marcuoli/go-hostdiscovery)](https://github.com/marcuoli/go-hostdiscovery/releases)
+
 A comprehensive, multi-protocol host and hostname discovery library for Go. Discover live hosts and resolve their hostnames using various protocols - all without admin privileges or raw sockets.
+
+**Version:** 1.0.0
 
 ## Features
 
@@ -222,6 +229,7 @@ Flags:
 
 ```
 pkg/hostdiscovery/
+├── version.go        # Version information
 ├── types.go          # Common types and constants
 ├── ip.go             # IP enumeration utilities
 ├── hostdiscovery.go  # TCP connect discovery
@@ -230,6 +238,8 @@ pkg/hostdiscovery/
 ├── mdns.go           # mDNS/Bonjour discovery
 ├── llmnr.go          # LLMNR discovery
 ├── ssdp.go           # SSDP/UPnP discovery
+├── dhcp.go           # DHCP INFORM discovery
+├── finger.go         # Finger protocol (RFC 1288)
 └── multi.go          # Unified multi-protocol discovery
 ```
 
