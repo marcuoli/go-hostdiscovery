@@ -17,6 +17,39 @@ go build -o bin/hostdiscovery ./cmd/hostdiscovery
 ./bin/hostdiscovery -cidr 10.0.0.0/24 -ports 80,443,22 -timeout 1s -workers 512
 ```
 
+## Library usage
+
+Import the package and call `Discover`:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	hd "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
+)
+
+func main() {
+	opts := hd.Options{Ports: []int{80, 443, 22}, Timeout: 800 * time.Millisecond, Workers: 256}
+	ips, err := hd.Discover(context.Background(), "192.168.1.0/24", opts)
+	if err != nil {
+		panic(err)
+	}
+	for _, ip := range ips {
+		fmt.Println(ip.String())
+	}
+}
+```
+
+Get the module:
+
+```bash
+go get github.com/marcuoli/go-hostdiscovery
+```
+
 Flags:
 - `-cidr`: CIDR to scan (required), e.g., `192.168.1.0/24`.
 - `-ports`: Comma-separated TCP ports to probe. Default: `80,443,22,3389`.

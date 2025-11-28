@@ -10,7 +10,7 @@ import (
     "strings"
     "time"
 
-    "github.com/marcuoli/go-hostdiscovery/internal/scanner"
+    "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
 )
 
 func parsePorts(s string) ([]int, error) {
@@ -64,8 +64,8 @@ func main() {
     }
 
     ctx := context.Background()
-    opts := scanner.Options{Ports: ports, Timeout: timeout, Workers: workers, Verbose: verbose}
-    ips, err := scanner.Discover(ctx, cidr, opts)
+    opts := hostdiscovery.Options{Ports: ports, Timeout: timeout, Workers: workers, Verbose: verbose}
+    ips, err := hostdiscovery.Discover(ctx, cidr, opts)
     if err != nil {
         fmt.Fprintf(os.Stderr, "scan error: %v\n", err)
         os.Exit(1)

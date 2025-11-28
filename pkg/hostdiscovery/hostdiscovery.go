@@ -1,4 +1,7 @@
-package scanner
+// Package hostdiscovery provides simple, concurrent host discovery over a CIDR
+// range using TCP connect probes. It does not require raw sockets or elevated
+// privileges and therefore works across platforms.
+package hostdiscovery
 
 import (
     "context"
@@ -8,16 +11,21 @@ import (
     "time"
 )
 
+// Options configures the discovery behavior.
 type Options struct {
-    Ports   []int
+    // Ports to probe on each host. At least one port is required.
+    Ports []int
+    // Timeout per TCP dial attempt.
     Timeout time.Duration
+    // Workers controls the concurrency level.
     Workers int
+    // Verbose is currently a no-op placeholder for future logging hooks.
     Verbose bool
 }
 
-// Discover performs a simple TCP connect-based host discovery over the given CIDR.
+// Discover performs a TCP connect-based host discovery over the given CIDR.
 // A host is considered up if any of the provided ports accepts a TCP connection
-// within the timeout. This works without raw sockets or admin privileges.
+// within the timeout. The scan stops early for a host once one port is reachable.
 func Discover(ctx context.Context, cidr string, opts Options) ([]net.IP, error) {
     _, ipnet, err := net.ParseCIDR(cidr)
     if err != nil {
@@ -77,7 +85,6 @@ enqueue:
 
 func enumerateIPs(n *net.IPNet) []net.IP {
     var res []net.IP
-    // Only IPv4 ranges are supported for sweep simplicity.
     base := n.IP.To4()
     if base == nil {
         return res
@@ -88,8 +95,6 @@ func enumerateIPs(n *net.IPNet) []net.IP {
     }
     network := ipToUint32(base) & ipToUint32(mask)
     broadcast := network | ^ipToUint32(mask)
-
-    // Skip network and broadcast addresses
     for u := network + 1; u < broadcast; u++ {
         res = append(res, uint32ToIP(u))
     }
