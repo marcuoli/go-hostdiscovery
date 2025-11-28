@@ -1,6 +1,6 @@
-// Package hostdiscovery: MAC vendor lookup using IEEE OUI database.
-// This file provides MAC address to vendor name resolution using the klauspost/oui library.
-package hostdiscovery
+// Package oui provides MAC address vendor lookup using the IEEE OUI database.
+// This package resolves MAC addresses to vendor/manufacturer names.
+package oui
 
 import (
 	"fmt"
@@ -18,9 +18,19 @@ var (
 	ouiDBErr  error
 	ouiDBMu   sync.RWMutex
 
-	// customOUIPath allows setting a custom path for the OUI database
-	customOUIPath string
+	// customDBPath allows setting a custom path for the OUI database
+	customDBPath string
 )
+
+// DebugLogger is a callback for debug logging.
+// Set this to receive debug messages from OUI operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
 
 // VendorInfo contains information about a MAC address vendor.
 type VendorInfo struct {
@@ -30,10 +40,10 @@ type VendorInfo struct {
 	Prefix       string
 }
 
-// SetOUIDatabase sets a custom path for the OUI database file.
+// SetDatabase sets a custom path for the OUI database file.
 // This should be called before any vendor lookups are performed.
 // If not set, the library will use its embedded database.
-func SetOUIDatabase(path string) error {
+func SetDatabase(path string) error {
 	ouiDBMu.Lock()
 	defer ouiDBMu.Unlock()
 
@@ -42,65 +52,65 @@ func SetOUIDatabase(path string) error {
 		return fmt.Errorf("OUI database file not found: %s", path)
 	}
 
-	customOUIPath = path
+	customDBPath = path
 
 	// Reset the once so the database can be reloaded
 	ouiDBOnce = sync.Once{}
 	ouiDB = nil
 	ouiDBErr = nil
 
-	debugLog(MethodVendor, "Custom OUI database path set: %s", path)
+	debugLog("Custom OUI database path set: %s", path)
 	return nil
 }
 
-// GetOUIDatabase returns the current OUI database path (empty if using embedded).
-func GetOUIDatabase() string {
+// GetDatabasePath returns the current OUI database path (empty if using embedded).
+func GetDatabasePath() string {
 	ouiDBMu.RLock()
 	defer ouiDBMu.RUnlock()
-	return customOUIPath
+	return customDBPath
 }
 
-// initOUIDB initializes the OUI database (lazy initialization).
-func initOUIDB() error {
+// initDB initializes the OUI database (lazy initialization).
+func initDB() error {
 	ouiDBOnce.Do(func() {
 		ouiDBMu.RLock()
-		path := customOUIPath
+		path := customDBPath
 		ouiDBMu.RUnlock()
 
 		if path != "" {
 			// Load from custom file
-			debugLog(MethodVendor, "Loading OUI database from: %s", path)
+			debugLog("Loading OUI database from: %s", path)
 			db, err := oui.OpenFile(path)
 			if err != nil {
 				ouiDBErr = fmt.Errorf("failed to open OUI database: %w", err)
 				return
 			}
 			ouiDB = db
-			debugLog(MethodVendor, "OUI database loaded successfully from custom path")
+			debugLog("OUI database loaded successfully from custom path")
 		} else {
 			// Use embedded static database
-			debugLog(MethodVendor, "Loading embedded OUI database")
+			debugLog("Loading embedded OUI database")
 			db, err := oui.OpenStaticFile("")
 			if err != nil {
 				ouiDBErr = fmt.Errorf("failed to load embedded OUI database: %w", err)
 				return
 			}
 			ouiDB = db
-			debugLog(MethodVendor, "Embedded OUI database loaded successfully")
+			debugLog("Embedded OUI database loaded successfully")
 		}
 	})
 	return ouiDBErr
 }
 
-// LookupVendor looks up the vendor information for a MAC address.
+// Lookup looks up the vendor information for a MAC address.
 // The MAC address can be in various formats: "00:11:22:33:44:55", "00-11-22-33-44-55", "001122334455"
-func LookupVendor(mac string) (*VendorInfo, error) {
-	if err := initOUIDB(); err != nil {
+func Lookup(mac string) (*VendorInfo, error) {
+	if err := initDB(); err != nil {
 		return nil, err
 	}
 
 	// Normalize MAC address
-	mac = normalizeMACForLookup(mac)
+	mac = NormalizeMAC(mac)
 	if mac == "" {
 		return nil, fmt.Errorf("invalid MAC address format")
 	}
@@ -115,7 +125,7 @@ func LookupVendor(mac string) (*VendorInfo, error) {
 	entry, err := ouiDB.Query(hwAddr.String())
 	if err != nil {
 		if err == oui.ErrNotFound {
-			debugLogVerbose(MethodVendor, "%s: vendor not found in database", mac)
+			debugLog("%s: vendor not found in database", mac)
 			return nil, nil // Not found is not an error, just unknown vendor
 		}
 		return nil, fmt.Errorf("OUI lookup failed: %w", err)
@@ -133,22 +143,23 @@ func LookupVendor(mac string) (*VendorInfo, error) {
 		vendor.Country = entry.Country
 	}
 
-	debugLogVerbose(MethodVendor, "%s -> %s", mac, vendor.Manufacturer)
+	debugLog("%s -> %s", mac, vendor.Manufacturer)
 	return vendor, nil
 }
 
-// LookupVendorName is a convenience function that returns just the manufacturer name.
+// LookupName is a convenience function that returns just the manufacturer name.
 // Returns empty string if not found or on error.
-func LookupVendorName(mac string) string {
-	vendor, err := LookupVendor(mac)
+func LookupName(mac string) string {
+	vendor, err := Lookup(mac)
 	if err != nil || vendor == nil {
 		return ""
 	}
 	return vendor.Manufacturer
 }
 
-// normalizeMACForLookup normalizes various MAC address formats to standard format.
-func normalizeMACForLookup(mac string) string {
+// NormalizeMAC normalizes various MAC address formats to standard format.
+// Returns empty string if invalid.
+func NormalizeMAC(mac string) string {
 	// Remove common separators and convert to lowercase
 	mac = strings.ToLower(mac)
 	mac = strings.ReplaceAll(mac, "-", "")
@@ -172,21 +183,21 @@ func normalizeMACForLookup(mac string) string {
 		mac[0:2], mac[2:4], mac[4:6], mac[6:8], mac[8:10], mac[10:12])
 }
 
-// ReloadOUIDatabase forces a reload of the OUI database.
+// Reload forces a reload of the OUI database.
 // Useful after updating the database file.
-func ReloadOUIDatabase() error {
+func Reload() error {
 	ouiDBMu.Lock()
 	ouiDBOnce = sync.Once{}
 	ouiDB = nil
 	ouiDBErr = nil
 	ouiDBMu.Unlock()
 
-	debugLog(MethodVendor, "OUI database reload triggered")
-	return initOUIDB()
+	debugLog("OUI database reload triggered")
+	return initDB()
 }
 
-// IsOUILoaded returns true if the OUI database has been loaded.
-func IsOUILoaded() bool {
+// IsLoaded returns true if the OUI database has been loaded.
+func IsLoaded() bool {
 	ouiDBMu.RLock()
 	defer ouiDBMu.RUnlock()
 	return ouiDB != nil

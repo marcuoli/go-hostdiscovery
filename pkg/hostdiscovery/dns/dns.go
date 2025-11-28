@@ -1,5 +1,5 @@
-// Package hostdiscovery: Reverse DNS (PTR) lookup utilities.
-package hostdiscovery
+// Package dns provides reverse DNS (PTR) lookup utilities.
+package dns
 
 import (
 	"context"
@@ -9,31 +9,47 @@ import (
 	"time"
 )
 
-// DNSResult contains the result of a reverse DNS lookup.
-type DNSResult struct {
+// DefaultTimeout is the default timeout for DNS lookups.
+const DefaultTimeout = 2 * time.Second
+
+// DefaultWorkers is the default number of concurrent workers.
+const DefaultWorkers = 256
+
+// DebugLogger is a callback for debug logging.
+// Set this to receive debug messages from DNS operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
+// Result contains the result of a reverse DNS lookup.
+type Result struct {
 	IP       string
 	Hostname string   // Primary hostname (first result)
 	All      []string // All returned hostnames
 	Error    error
 }
 
-// DNSDiscovery performs reverse DNS lookups.
-type DNSDiscovery struct {
+// Discovery performs reverse DNS lookups.
+type Discovery struct {
 	Timeout time.Duration
 	Workers int
 }
 
-// NewDNSDiscovery creates a new DNS discovery helper with defaults.
-func NewDNSDiscovery() *DNSDiscovery {
-	return &DNSDiscovery{
+// NewDiscovery creates a new DNS discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{
 		Timeout: DefaultTimeout,
 		Workers: DefaultWorkers,
 	}
 }
 
 // LookupAddr performs a reverse DNS (PTR) lookup for the given IP address.
-func (d *DNSDiscovery) LookupAddr(ctx context.Context, ip string) (*DNSResult, error) {
-	res := &DNSResult{IP: ip}
+func (d *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) {
+	res := &Result{IP: ip}
 
 	// Use custom resolver with timeout
 	resolver := &net.Resolver{}
@@ -43,6 +59,7 @@ func (d *DNSDiscovery) LookupAddr(ctx context.Context, ip string) (*DNSResult, e
 	names, err := resolver.LookupAddr(lookupCtx, ip)
 	if err != nil {
 		res.Error = err
+		debugLog("%s: lookup failed: %v", ip, err)
 		return res, err
 	}
 
@@ -54,12 +71,13 @@ func (d *DNSDiscovery) LookupAddr(ctx context.Context, ip string) (*DNSResult, e
 	res.All = names
 	if len(names) > 0 {
 		res.Hostname = names[0]
+		debugLog("%s -> %s", ip, res.Hostname)
 	}
 	return res, nil
 }
 
 // LookupMultiple performs reverse DNS lookups on multiple IPs concurrently.
-func (d *DNSDiscovery) LookupMultiple(ctx context.Context, ips []string) []*DNSResult {
+func (d *Discovery) LookupMultiple(ctx context.Context, ips []string) []*Result {
 	if len(ips) == 0 {
 		return nil
 	}
@@ -69,7 +87,7 @@ func (d *DNSDiscovery) LookupMultiple(ctx context.Context, ips []string) []*DNSR
 		workers = DefaultWorkers
 	}
 
-	results := make([]*DNSResult, len(ips))
+	results := make([]*Result, len(ips))
 	jobs := make(chan int, len(ips))
 	var wg sync.WaitGroup
 

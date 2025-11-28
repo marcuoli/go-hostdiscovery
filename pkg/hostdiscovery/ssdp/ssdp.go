@@ -1,4 +1,4 @@
-// Package hostdiscovery: SSDP/UPnP discovery for IoT and media devices.
+// Package ssdp provides SSDP/UPnP discovery for IoT and media devices.
 // SSDP (Simple Service Discovery Protocol) is commonly used by:
 //   - Smart TVs (Samsung, LG, Sony, etc.)
 //   - Media players (Roku, Apple TV, Fire TV, Chromecast)
@@ -10,7 +10,7 @@
 //   - Routers and network equipment
 //
 // This implementation uses github.com/koron/go-ssdp for robust SSDP handling.
-package hostdiscovery
+package ssdp
 
 import (
 	"bufio"
@@ -22,42 +22,53 @@ import (
 	"sync"
 	"time"
 
-	"github.com/koron/go-ssdp"
+	gossdp "github.com/koron/go-ssdp"
 )
 
+// DebugLogger is the callback function for debug logging.
+// Set this to enable debug output for SSDP operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
 const (
-	ssdpTimeout = 3 * time.Second
+	// DefaultTimeout is the default timeout for SSDP discovery
+	DefaultTimeout = 3 * time.Second
 )
 
 // Common SSDP search targets
 const (
-	// SSDPAll searches for all devices and services
-	SSDPAll = ssdp.All // "ssdp:all"
+	// All searches for all devices and services
+	All = gossdp.All // "ssdp:all"
 
-	// SSDPRootDevice searches for UPnP root devices only
-	SSDPRootDevice = ssdp.RootDevice // "upnp:rootdevice"
+	// RootDevice searches for UPnP root devices only
+	RootDevice = gossdp.RootDevice // "upnp:rootdevice"
 
-	// SSDPMediaRenderer searches for media renderers (TVs, speakers)
-	SSDPMediaRenderer = "urn:schemas-upnp-org:device:MediaRenderer:1"
+	// MediaRenderer searches for media renderers (TVs, speakers)
+	MediaRenderer = "urn:schemas-upnp-org:device:MediaRenderer:1"
 
-	// SSDPMediaServer searches for media servers (NAS, DLNA servers)
-	SSDPMediaServer = "urn:schemas-upnp-org:device:MediaServer:1"
+	// MediaServer searches for media servers (NAS, DLNA servers)
+	MediaServer = "urn:schemas-upnp-org:device:MediaServer:1"
 
-	// SSDPDialMultiscreen searches for DIAL/Chromecast devices
-	SSDPDialMultiscreen = "urn:dial-multiscreen-org:service:dial:1"
+	// DialMultiscreen searches for DIAL/Chromecast devices
+	DialMultiscreen = "urn:dial-multiscreen-org:service:dial:1"
 
-	// SSDPBasicDevice searches for basic UPnP devices
-	SSDPBasicDevice = "urn:schemas-upnp-org:device:Basic:1"
+	// BasicDevice searches for basic UPnP devices
+	BasicDevice = "urn:schemas-upnp-org:device:Basic:1"
 
-	// SSDPInternetGateway searches for routers/gateways
-	SSDPInternetGateway = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
+	// InternetGateway searches for routers/gateways
+	InternetGateway = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
 
-	// SSDPPrinter searches for UPnP printers
-	SSDPPrinter = "urn:schemas-upnp-org:service:PrintBasic:1"
+	// Printer searches for UPnP printers
+	Printer = "urn:schemas-upnp-org:service:PrintBasic:1"
 )
 
-// SSDPResult contains the result of an SSDP discovery.
-type SSDPResult struct {
+// Result contains the result of an SSDP discovery.
+type Result struct {
 	IP           string
 	Location     string // URL to device description XML
 	Server       string // Server header (OS/device info)
@@ -70,35 +81,36 @@ type SSDPResult struct {
 	Error        error
 }
 
-// SSDPDiscovery performs SSDP-based device discovery using koron/go-ssdp.
-type SSDPDiscovery struct {
+// Discovery performs SSDP-based device discovery using koron/go-ssdp.
+type Discovery struct {
 	Timeout    time.Duration
 	Interfaces []net.Interface // Specific interfaces to use (nil = all)
 }
 
-// NewSSDPDiscovery creates a new SSDP discovery helper with defaults.
-func NewSSDPDiscovery() *SSDPDiscovery {
-	return &SSDPDiscovery{Timeout: ssdpTimeout}
+// NewDiscovery creates a new SSDP discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{Timeout: DefaultTimeout}
 }
 
 // Discover performs SSDP M-SEARCH to find all devices on the network.
 // searchTarget can be:
-//   - SSDPAll ("ssdp:all") - All devices
-//   - SSDPRootDevice ("upnp:rootdevice") - Root devices only
-//   - SSDPMediaRenderer - Smart TVs, speakers, media players
-//   - SSDPMediaServer - NAS, DLNA servers
-//   - SSDPDialMultiscreen - Chromecast, DIAL-enabled devices
-//   - SSDPInternetGateway - Routers
+//   - All ("ssdp:all") - All devices
+//   - RootDevice ("upnp:rootdevice") - Root devices only
+//   - MediaRenderer - Smart TVs, speakers, media players
+//   - MediaServer - NAS, DLNA servers
+//   - DialMultiscreen - Chromecast, DIAL-enabled devices
+//   - InternetGateway - Routers
 //   - Custom URN strings
-func (s *SSDPDiscovery) Discover(ctx context.Context, searchTarget string) ([]*SSDPResult, error) {
+func (s *Discovery) Discover(ctx context.Context, searchTarget string) ([]*Result, error) {
 	if searchTarget == "" {
-		searchTarget = SSDPAll
+		searchTarget = All
 	}
+	debugLog("SSDP Discover target=%s timeout=%v", searchTarget, s.Timeout)
 
 	// Configure interfaces if specified
 	if len(s.Interfaces) > 0 {
-		ssdp.Interfaces = s.Interfaces
-		defer func() { ssdp.Interfaces = nil }()
+		gossdp.Interfaces = s.Interfaces
+		defer func() { gossdp.Interfaces = nil }()
 	}
 
 	// Calculate wait time in seconds (minimum 1)
@@ -108,11 +120,11 @@ func (s *SSDPDiscovery) Discover(ctx context.Context, searchTarget string) ([]*S
 	}
 
 	// Use context for cancellation
-	resultCh := make(chan []ssdp.Service, 1)
+	resultCh := make(chan []gossdp.Service, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
-		services, err := ssdp.Search(searchTarget, waitSec, "")
+		services, err := gossdp.Search(searchTarget, waitSec, "")
 		if err != nil {
 			errCh <- err
 			return
@@ -126,22 +138,25 @@ func (s *SSDPDiscovery) Discover(ctx context.Context, searchTarget string) ([]*S
 	case err := <-errCh:
 		return nil, fmt.Errorf("SSDP search: %w", err)
 	case services := <-resultCh:
-		return s.convertServices(services), nil
+		results := s.convertServices(services)
+		debugLog("SSDP Discover found %d devices", len(results))
+		return results, nil
 	}
 }
 
 // DiscoverAll performs multiple searches to find various device types.
 // Returns a combined, deduplicated list of all discovered devices.
-func (s *SSDPDiscovery) DiscoverAll(ctx context.Context) ([]*SSDPResult, error) {
+func (s *Discovery) DiscoverAll(ctx context.Context) ([]*Result, error) {
+	debugLog("SSDP DiscoverAll starting")
 	searchTargets := []string{
-		SSDPAll,
-		SSDPRootDevice,
-		SSDPMediaRenderer,
-		SSDPDialMultiscreen,
+		All,
+		RootDevice,
+		MediaRenderer,
+		DialMultiscreen,
 	}
 
 	seen := make(map[string]bool)
-	var results []*SSDPResult
+	var results []*Result
 	var mu sync.Mutex
 
 	for _, st := range searchTargets {
@@ -170,14 +185,15 @@ func (s *SSDPDiscovery) DiscoverAll(ctx context.Context) ([]*SSDPResult, error) 
 		mu.Unlock()
 	}
 
+	debugLog("SSDP DiscoverAll found %d unique devices", len(results))
 	return results, nil
 }
 
 // LookupAddr checks if a specific IP has SSDP-enabled devices.
 // Note: SSDP is typically multicast-based, so this sends a unicast M-SEARCH
 // which may not be supported by all devices.
-func (s *SSDPDiscovery) LookupAddr(ctx context.Context, ip string) (*SSDPResult, error) {
-	res := &SSDPResult{IP: ip}
+func (s *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) {
+	res := &Result{IP: ip}
 
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -186,7 +202,7 @@ func (s *SSDPDiscovery) LookupAddr(ctx context.Context, ip string) (*SSDPResult,
 	}
 
 	// Do a full discovery and filter by IP
-	results, err := s.Discover(ctx, SSDPAll)
+	results, err := s.Discover(ctx, All)
 	if err != nil {
 		res.Error = err
 		return res, err
@@ -204,13 +220,13 @@ func (s *SSDPDiscovery) LookupAddr(ctx context.Context, ip string) (*SSDPResult,
 
 // Monitor starts monitoring for SSDP alive/bye announcements.
 // Returns channels for alive messages, bye messages, and a stop function.
-func (s *SSDPDiscovery) Monitor(ctx context.Context) (<-chan *SSDPResult, <-chan string, error) {
-	aliveCh := make(chan *SSDPResult, 100)
+func (s *Discovery) Monitor(ctx context.Context) (<-chan *Result, <-chan string, error) {
+	aliveCh := make(chan *Result, 100)
 	byeCh := make(chan string, 100) // USN of device going offline
 
-	monitor := &ssdp.Monitor{
-		Alive: func(m *ssdp.AliveMessage) {
-			result := &SSDPResult{
+	monitor := &gossdp.Monitor{
+		Alive: func(m *gossdp.AliveMessage) {
+			result := &Result{
 				Location: m.Location,
 				Server:   m.Server,
 				USN:      m.USN,
@@ -231,7 +247,7 @@ func (s *SSDPDiscovery) Monitor(ctx context.Context) (<-chan *SSDPResult, <-chan
 			default: // Don't block if channel full
 			}
 		},
-		Bye: func(m *ssdp.ByeMessage) {
+		Bye: func(m *gossdp.ByeMessage) {
 			select {
 			case byeCh <- m.USN:
 			default:
@@ -258,7 +274,7 @@ func (s *SSDPDiscovery) Monitor(ctx context.Context) (<-chan *SSDPResult, <-chan
 
 // GetDeviceInfo fetches and parses the device description XML from the Location URL.
 // Returns detailed device information including friendly name, manufacturer, model.
-func (s *SSDPDiscovery) GetDeviceInfo(ctx context.Context, locationURL string) (*SSDPResult, error) {
+func (s *Discovery) GetDeviceInfo(ctx context.Context, locationURL string) (*Result, error) {
 	if locationURL == "" {
 		return nil, fmt.Errorf("no location URL")
 	}
@@ -275,7 +291,7 @@ func (s *SSDPDiscovery) GetDeviceInfo(ctx context.Context, locationURL string) (
 	}
 	defer resp.Body.Close()
 
-	result := &SSDPResult{Location: locationURL}
+	result := &Result{Location: locationURL}
 
 	// Simple XML parsing: look for key elements
 	scanner := bufio.NewScanner(resp.Body)
@@ -298,7 +314,7 @@ func (s *SSDPDiscovery) GetDeviceInfo(ctx context.Context, locationURL string) (
 
 // EnrichResults fetches device info for each result's Location URL.
 // This populates FriendlyName, Manufacturer, and ModelName fields.
-func (s *SSDPDiscovery) EnrichResults(ctx context.Context, results []*SSDPResult) {
+func (s *Discovery) EnrichResults(ctx context.Context, results []*Result) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 5) // Limit concurrent requests
 
@@ -308,7 +324,7 @@ func (s *SSDPDiscovery) EnrichResults(ctx context.Context, results []*SSDPResult
 		}
 
 		wg.Add(1)
-		go func(result *SSDPResult) {
+		go func(result *Result) {
 			defer wg.Done()
 
 			select {
@@ -330,12 +346,12 @@ func (s *SSDPDiscovery) EnrichResults(ctx context.Context, results []*SSDPResult
 	wg.Wait()
 }
 
-// convertServices converts go-ssdp Service slice to our SSDPResult slice
-func (s *SSDPDiscovery) convertServices(services []ssdp.Service) []*SSDPResult {
-	results := make([]*SSDPResult, 0, len(services))
+// convertServices converts go-ssdp Service slice to our Result slice
+func (s *Discovery) convertServices(services []gossdp.Service) []*Result {
+	results := make([]*Result, 0, len(services))
 
 	for _, svc := range services {
-		result := &SSDPResult{
+		result := &Result{
 			Location: svc.Location,
 			Server:   svc.Server,
 			USN:      svc.USN,

@@ -453,7 +453,7 @@ func TestDHCPDiscovery_SendDHCPInform(t *testing.T) {
 	dhcp := NewDHCPDiscovery()
 	dhcp.Timeout = 3 * time.Second
 
-	result, err := dhcp.SendDHCPInform(ctx, testDHCPLocalIP)
+	result, err := dhcp.SendInform(ctx, testDHCPLocalIP)
 	if err != nil {
 		// May fail due to permissions or no DHCP server on network
 		t.Logf("DHCP INFORM returned error (may be expected): %v", err)
@@ -480,7 +480,7 @@ func TestDHCPDiscovery_SendDHCPInformToServer(t *testing.T) {
 	dhcp := NewDHCPDiscovery()
 	dhcp.Timeout = 3 * time.Second
 
-	result, err := dhcp.SendDHCPInformToServer(ctx, testDHCPLocalIP, testDHCPServerIP)
+	result, err := dhcp.SendInformToServer(ctx, testDHCPLocalIP, testDHCPServerIP)
 	if err != nil {
 		t.Logf("DHCP INFORM to server returned error (may be expected): %v", err)
 		return

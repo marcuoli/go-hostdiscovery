@@ -1,7 +1,7 @@
-// Package hostdiscovery: NetBIOS-based hostname discovery utilities.
-// This file provides Node Status (NBSTAT) lookups over UDP/137 similar to
+// Package netbios provides NetBIOS-based hostname discovery utilities.
+// This package provides Node Status (NBSTAT) lookups over UDP/137 similar to
 // nmblookup -A. Works without elevated privileges.
-package hostdiscovery
+package netbios
 
 import (
 	"bytes"
@@ -15,13 +15,24 @@ import (
 )
 
 const (
-	// UDP port for NetBIOS Name Service
-	netBIOSPort    = 137
-	netBIOSTimeout = 2 * time.Second
+	// Port is the UDP port for NetBIOS Name Service
+	Port = 137
+	// DefaultTimeout is the default timeout for NetBIOS lookups
+	DefaultTimeout = 2 * time.Second
 )
 
-// NetBIOSName represents a discovered NetBIOS name entry.
-type NetBIOSName struct {
+// DebugLogger is a callback for debug logging.
+// Set this to receive debug messages from NetBIOS operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
+// Name represents a discovered NetBIOS name entry.
+type Name struct {
 	Name     string
 	Suffix   byte
 	Type     string
@@ -29,28 +40,28 @@ type NetBIOSName struct {
 	IsActive bool
 }
 
-// NetBIOSResult contains the result of a NetBIOS Node Status lookup.
-type NetBIOSResult struct {
+// Result contains the result of a NetBIOS Node Status lookup.
+type Result struct {
 	IP         string
-	Names      []NetBIOSName
+	Names      []Name
 	MACAddress string
 	Hostname   string // Primary hostname (first workstation name found)
 }
 
-// NetBIOSDiscovery performs NetBIOS-based hostname discovery.
-type NetBIOSDiscovery struct {
+// Discovery performs NetBIOS-based hostname discovery.
+type Discovery struct {
 	Timeout time.Duration
 }
 
-// NewNetBIOSDiscovery creates a new NetBIOS discovery helper with defaults.
-func NewNetBIOSDiscovery() *NetBIOSDiscovery {
-	return &NetBIOSDiscovery{Timeout: netBIOSTimeout}
+// NewDiscovery creates a new NetBIOS discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{Timeout: DefaultTimeout}
 }
 
 // LookupAddr performs a NetBIOS Node Status query (NBSTAT) to a specific IPv4 address.
 // It tries the optimal interface first, then falls back to other interfaces if needed.
-func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSResult, error) {
-	res := &NetBIOSResult{IP: ip}
+func (n *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) {
+	res := &Result{IP: ip}
 
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -76,8 +87,8 @@ func (n *NetBIOSDiscovery) LookupAddr(ctx context.Context, ip string) (*NetBIOSR
 }
 
 // lookupFromInterface performs the actual NetBIOS lookup from a specific local address.
-func (n *NetBIOSDiscovery) lookupFromInterface(ctx context.Context, targetIP net.IP, localAddr string) (*NetBIOSResult, error) {
-	res := &NetBIOSResult{IP: targetIP.String()}
+func (n *Discovery) lookupFromInterface(ctx context.Context, targetIP net.IP, localAddr string) (*Result, error) {
+	res := &Result{IP: targetIP.String()}
 
 	conn, err := net.ListenPacket("udp4", localAddr)
 	if err != nil {
@@ -91,15 +102,17 @@ func (n *NetBIOSDiscovery) lookupFromInterface(ctx context.Context, targetIP net
 	}
 	_ = conn.SetDeadline(deadline)
 
-	addr := &net.UDPAddr{IP: targetIP, Port: netBIOSPort}
+	addr := &net.UDPAddr{IP: targetIP, Port: Port}
 	req := buildNBSTATRequest()
 	if _, err := conn.WriteTo(req, addr); err != nil {
+		debugLog("%s: send failed: %v", targetIP, err)
 		return res, fmt.Errorf("send request: %w", err)
 	}
 
 	buf := make([]byte, 2048)
 	nRead, _, err := conn.ReadFrom(buf)
 	if err != nil {
+		debugLog("%s: read failed: %v", targetIP, err)
 		return res, fmt.Errorf("read response: %w", err)
 	}
 	if nRead == 0 {
@@ -107,7 +120,11 @@ func (n *NetBIOSDiscovery) lookupFromInterface(ctx context.Context, targetIP net
 	}
 
 	if err := parseNBSTATResponse(buf[:nRead], res); err != nil {
+		debugLog("%s: parse failed: %v", targetIP, err)
 		return res, fmt.Errorf("parse response: %w", err)
+	}
+	if res.Hostname != "" {
+		debugLog("%s -> %s (MAC: %s)", targetIP, res.Hostname, res.MACAddress)
 	}
 	return res, nil
 }
@@ -118,7 +135,7 @@ func getLocalAddrsForSubnet(targetIP net.IP) []string {
 	var addrs []string
 
 	// First, try the OS-determined best route
-	if conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: 137}); err == nil {
+	if conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: Port}); err == nil {
 		localAddr := conn.LocalAddr().(*net.UDPAddr)
 		addrs = append(addrs, localAddr.IP.String()+":0")
 		conn.Close()
@@ -174,25 +191,12 @@ func getLocalAddrsForSubnet(targetIP net.IP) []string {
 	return addrs
 }
 
-// findLocalAddrFor finds the best local address to reach a target IP.
-func findLocalAddrFor(targetIP net.IP) (string, error) {
-	// Use a UDP "connection" to determine which local interface would be used
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: targetIP, Port: 137})
-	if err != nil {
-		return ":0", err
-	}
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String() + ":0", nil
-}
-
 // LookupMultiple performs NetBIOS lookups on multiple IPs concurrently.
-func (n *NetBIOSDiscovery) LookupMultiple(ctx context.Context, ips []string) []*NetBIOSResult {
+func (n *Discovery) LookupMultiple(ctx context.Context, ips []string) []*Result {
 	if len(ips) == 0 {
 		return nil
 	}
-	out := make([]*NetBIOSResult, len(ips))
+	out := make([]*Result, len(ips))
 	done := make(chan struct{})
 	for i, ip := range ips {
 		go func(idx int, ipAddr string) {
@@ -246,16 +250,11 @@ func buildNBSTATRequest() []byte {
 	return buf.Bytes()
 }
 
-// parseNBSTATResponse parses a Node Status response into NetBIOSResult.
-func parseNBSTATResponse(data []byte, result *NetBIOSResult) error {
+// parseNBSTATResponse parses a Node Status response into Result.
+func parseNBSTATResponse(data []byte, result *Result) error {
 	if len(data) < 57 {
 		return fmt.Errorf("response too short: %d bytes", len(data))
 	}
-
-	// For debugging/diagnostics: ensure it's a response by checking the flags QR bit
-	// Not strictly necessary for basic parsing; left as a minimal sanity check.
-	// flags := binary.BigEndian.Uint16(data[2:4])
-	// if (flags & 0x8000) == 0 { return fmt.Errorf("not a response packet") }
 
 	numNames := int(data[56])
 	off := 57
@@ -268,7 +267,7 @@ func parseNBSTATResponse(data []byte, result *NetBIOSResult) error {
 		name := strings.TrimRight(string(entry[0:15]), " \x00")
 		suffix := entry[15]
 		flags := binary.BigEndian.Uint16(entry[16:18])
-		nb := NetBIOSName{
+		nb := Name{
 			Name:     name,
 			Suffix:   suffix,
 			Type:     suffixDescription(suffix),

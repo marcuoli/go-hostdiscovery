@@ -1,12 +1,12 @@
-// Package hostdiscovery: DHCP hostname discovery utilities.
-// This file provides methods to discover hostnames using the DHCP protocol directly.
+// Package dhcp provides DHCP hostname discovery utilities.
+// This package provides methods to discover hostnames using the DHCP protocol directly.
 //
 // The primary method is DHCP INFORM request which queries the DHCP server
 // directly for configuration parameters including hostname and domain.
 //
 // Note: DHCP INFORM requires binding to UDP port 68 which may need
 // elevated privileges on some systems.
-package hostdiscovery
+package dhcp
 
 import (
 	"context"
@@ -17,22 +17,37 @@ import (
 	"time"
 )
 
+// DebugLogger is the callback function for debug logging.
+// Set this to enable debug output for DHCP operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
 const (
-	dhcpTimeout     = 2 * time.Second
-	dhcpServerPort  = 67
-	dhcpClientPort  = 68
-	dhcpMagicCookie = 0x63825363
-	dhcpMaxMsgSize  = 576
+	// DefaultTimeout is the default timeout for DHCP operations
+	DefaultTimeout = 2 * time.Second
+	// ServerPort is the DHCP server port
+	ServerPort = 67
+	// ClientPort is the DHCP client port
+	ClientPort = 68
+	// MagicCookie is the DHCP magic cookie value
+	MagicCookie = 0x63825363
+	// MaxMsgSize is the maximum DHCP message size
+	MaxMsgSize = 576
 
 	// DHCP Message Types
-	dhcpDiscover = 1
-	dhcpOffer    = 2
-	dhcpRequest  = 3
-	dhcpDecline  = 4
-	dhcpAck      = 5
-	dhcpNak      = 6
-	dhcpRelease  = 7
-	dhcpInform   = 8
+	msgDiscover = 1
+	msgOffer    = 2
+	msgRequest  = 3
+	msgDecline  = 4
+	msgAck      = 5
+	msgNak      = 6
+	msgRelease  = 7
+	msgInform   = 8
 
 	// DHCP Options
 	optPad          = 0
@@ -52,23 +67,19 @@ const (
 	optEnd          = 255
 )
 
-// DHCPDiscovery performs DHCP protocol-based hostname discovery.
+// Discovery performs DHCP protocol-based hostname discovery.
 // Uses DHCP INFORM packets to query DHCP servers directly for configuration.
-type DHCPDiscovery struct {
+type Discovery struct {
 	Timeout time.Duration
 }
 
-// NewDHCPDiscovery creates a new DHCP discovery helper with defaults.
-func NewDHCPDiscovery() *DHCPDiscovery {
-	return &DHCPDiscovery{Timeout: dhcpTimeout}
+// NewDiscovery creates a new DHCP discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{Timeout: DefaultTimeout}
 }
 
-// ============================================================================
-// DHCP INFORM Implementation
-// ============================================================================
-
-// DHCPInformResult contains information from a DHCP INFORM response.
-type DHCPInformResult struct {
+// InformResult contains information from a DHCP INFORM response.
+type InformResult struct {
 	ServerIP      string   // DHCP server that responded
 	Hostname      string   // Option 12: Host Name
 	DomainName    string   // Option 15: Domain Name
@@ -79,33 +90,15 @@ type DHCPInformResult struct {
 	Error         error
 }
 
-// dhcpPacket represents a DHCP message structure.
-type dhcpPacket struct {
-	Op      byte      // Message op code: 1 = BOOTREQUEST, 2 = BOOTREPLY
-	Htype   byte      // Hardware address type: 1 = Ethernet
-	Hlen    byte      // Hardware address length: 6 for Ethernet
-	Hops    byte      // Optionally used by relay agents
-	Xid     uint32    // Transaction ID
-	Secs    uint16    // Seconds elapsed since client began process
-	Flags   uint16    // Flags (broadcast bit)
-	Ciaddr  net.IP    // Client IP address (if known)
-	Yiaddr  net.IP    // 'Your' (client) IP address
-	Siaddr  net.IP    // Next server IP address
-	Giaddr  net.IP    // Relay agent IP address
-	Chaddr  [16]byte  // Client hardware address
-	Sname   [64]byte  // Server host name
-	File    [128]byte // Boot file name
-	Options []byte    // Optional parameters field
-}
-
-// SendDHCPInform sends a DHCPINFORM packet and returns server configuration.
+// SendInform sends a DHCPINFORM packet and returns server configuration.
 // DHCPINFORM is used when a client already has an IP address and only needs
 // additional configuration parameters from the DHCP server.
 //
 // Note: This requires binding to UDP port 68 which may need elevated privileges
 // on some systems. On Windows, it typically works without admin rights.
-func (d *DHCPDiscovery) SendDHCPInform(ctx context.Context, clientIP string) (*DHCPInformResult, error) {
-	result := &DHCPInformResult{}
+func (d *Discovery) SendInform(ctx context.Context, clientIP string) (*InformResult, error) {
+	result := &InformResult{}
+	debugLog("DHCP INFORM for %s", clientIP)
 
 	parsedIP := net.ParseIP(clientIP)
 	if parsedIP == nil {
@@ -126,15 +119,15 @@ func (d *DHCPDiscovery) SendDHCPInform(ctx context.Context, clientIP string) (*D
 	}
 
 	// Build DHCPINFORM packet
-	packet := d.buildDHCPInform(parsedIP, mac)
+	packet := d.buildInform(parsedIP, mac)
 
 	// Send the packet
 	timeout := d.Timeout
 	if timeout == 0 {
-		timeout = dhcpTimeout
+		timeout = DefaultTimeout
 	}
 
-	response, serverAddr, err := d.sendDHCPPacket(ctx, localAddr, packet, timeout)
+	response, serverAddr, err := d.sendPacket(ctx, localAddr, packet, timeout)
 	if err != nil {
 		result.Error = err
 		return result, err
@@ -143,13 +136,14 @@ func (d *DHCPDiscovery) SendDHCPInform(ctx context.Context, clientIP string) (*D
 	result.ServerIP = serverAddr
 
 	// Parse DHCP options from response
-	d.parseDHCPOptions(response, result)
+	d.parseOptions(response, result)
 
+	debugLog("DHCP INFORM response: server=%s hostname=%s domain=%s", result.ServerIP, result.Hostname, result.DomainName)
 	return result, nil
 }
 
 // getInterfaceForIP finds the local interface and MAC address for a given IP.
-func (d *DHCPDiscovery) getInterfaceForIP(targetIP string) (string, net.HardwareAddr, error) {
+func (d *Discovery) getInterfaceForIP(targetIP string) (string, net.HardwareAddr, error) {
 	target := net.ParseIP(targetIP)
 	if target == nil {
 		return "", nil, fmt.Errorf("invalid IP: %s", targetIP)
@@ -189,9 +183,9 @@ func (d *DHCPDiscovery) getInterfaceForIP(targetIP string) (string, net.Hardware
 	return "", nil, fmt.Errorf("no interface found for IP %s", targetIP)
 }
 
-// buildDHCPInform creates a DHCPINFORM packet.
-func (d *DHCPDiscovery) buildDHCPInform(clientIP net.IP, mac net.HardwareAddr) []byte {
-	packet := make([]byte, dhcpMaxMsgSize)
+// buildInform creates a DHCPINFORM packet.
+func (d *Discovery) buildInform(clientIP net.IP, mac net.HardwareAddr) []byte {
+	packet := make([]byte, MaxMsgSize)
 
 	// BOOTP header
 	packet[0] = 1 // Op: BOOTREQUEST
@@ -222,7 +216,7 @@ func (d *DHCPDiscovery) buildDHCPInform(clientIP net.IP, mac net.HardwareAddr) [
 	// packet[34:236] already zero
 
 	// DHCP Magic Cookie
-	binary.BigEndian.PutUint32(packet[236:240], dhcpMagicCookie)
+	binary.BigEndian.PutUint32(packet[236:240], MagicCookie)
 
 	// DHCP Options start at byte 240
 	optIdx := 240
@@ -230,7 +224,7 @@ func (d *DHCPDiscovery) buildDHCPInform(clientIP net.IP, mac net.HardwareAddr) [
 	// Option 53: DHCP Message Type = DHCPINFORM (8)
 	packet[optIdx] = optMessageType
 	packet[optIdx+1] = 1
-	packet[optIdx+2] = dhcpInform
+	packet[optIdx+2] = msgInform
 	optIdx += 3
 
 	// Option 55: Parameter Request List
@@ -248,7 +242,7 @@ func (d *DHCPDiscovery) buildDHCPInform(clientIP net.IP, mac net.HardwareAddr) [
 	// Option 57: Maximum DHCP Message Size
 	packet[optIdx] = optMaxMsgSize
 	packet[optIdx+1] = 2
-	binary.BigEndian.PutUint16(packet[optIdx+2:optIdx+4], dhcpMaxMsgSize)
+	binary.BigEndian.PutUint16(packet[optIdx+2:optIdx+4], MaxMsgSize)
 	optIdx += 4
 
 	// Option 61: Client Identifier (type + MAC)
@@ -267,13 +261,13 @@ func (d *DHCPDiscovery) buildDHCPInform(clientIP net.IP, mac net.HardwareAddr) [
 	return packet[:optIdx]
 }
 
-// sendDHCPPacket sends a DHCP packet and waits for a response.
-func (d *DHCPDiscovery) sendDHCPPacket(ctx context.Context, localIP string, packet []byte, timeout time.Duration) ([]byte, string, error) {
+// sendPacket sends a DHCP packet and waits for a response.
+func (d *Discovery) sendPacket(ctx context.Context, localIP string, packet []byte, timeout time.Duration) ([]byte, string, error) {
 	// Try to bind to DHCP client port (68)
 	// Note: This may require elevated privileges on some systems
 	localAddr := &net.UDPAddr{
 		IP:   net.ParseIP(localIP),
-		Port: dhcpClientPort,
+		Port: ClientPort,
 	}
 
 	// First try binding to specific IP:68
@@ -301,7 +295,7 @@ func (d *DHCPDiscovery) sendDHCPPacket(ctx context.Context, localIP string, pack
 	// Send to broadcast first
 	broadcastAddr := &net.UDPAddr{
 		IP:   net.IPv4bcast,
-		Port: dhcpServerPort,
+		Port: ServerPort,
 	}
 
 	_, err = conn.WriteTo(packet, broadcastAddr)
@@ -312,7 +306,7 @@ func (d *DHCPDiscovery) sendDHCPPacket(ctx context.Context, localIP string, pack
 	}
 
 	// Read response
-	response := make([]byte, dhcpMaxMsgSize)
+	response := make([]byte, MaxMsgSize)
 	xid := binary.BigEndian.Uint32(packet[4:8])
 
 	for {
@@ -342,7 +336,7 @@ func (d *DHCPDiscovery) sendDHCPPacket(ctx context.Context, localIP string, pack
 
 		// Verify magic cookie
 		cookie := binary.BigEndian.Uint32(response[236:240])
-		if cookie != dhcpMagicCookie {
+		if cookie != MagicCookie {
 			continue // Not a DHCP packet
 		}
 
@@ -350,8 +344,8 @@ func (d *DHCPDiscovery) sendDHCPPacket(ctx context.Context, localIP string, pack
 	}
 }
 
-// parseDHCPOptions extracts relevant options from a DHCP response.
-func (d *DHCPDiscovery) parseDHCPOptions(packet []byte, result *DHCPInformResult) {
+// parseOptions extracts relevant options from a DHCP response.
+func (d *Discovery) parseOptions(packet []byte, result *InformResult) {
 	if len(packet) < 241 {
 		return
 	}
@@ -425,10 +419,10 @@ func (d *DHCPDiscovery) parseDHCPOptions(packet []byte, result *DHCPInformResult
 	}
 }
 
-// SendDHCPInformToServer sends a DHCPINFORM directly to a known DHCP server.
+// SendInformToServer sends a DHCPINFORM directly to a known DHCP server.
 // This is more reliable than broadcast when you know the server address.
-func (d *DHCPDiscovery) SendDHCPInformToServer(ctx context.Context, clientIP, serverIP string) (*DHCPInformResult, error) {
-	result := &DHCPInformResult{}
+func (d *Discovery) SendInformToServer(ctx context.Context, clientIP, serverIP string) (*InformResult, error) {
+	result := &InformResult{}
 
 	parsedClientIP := net.ParseIP(clientIP)
 	if parsedClientIP == nil {
@@ -451,12 +445,12 @@ func (d *DHCPDiscovery) SendDHCPInformToServer(ctx context.Context, clientIP, se
 	}
 
 	// Build DHCPINFORM packet
-	packet := d.buildDHCPInform(parsedClientIP, mac)
+	packet := d.buildInform(parsedClientIP, mac)
 
 	// Create UDP connection
 	timeout := d.Timeout
 	if timeout == 0 {
-		timeout = dhcpTimeout
+		timeout = DefaultTimeout
 	}
 
 	localUDPAddr := &net.UDPAddr{
@@ -478,7 +472,7 @@ func (d *DHCPDiscovery) SendDHCPInformToServer(ctx context.Context, clientIP, se
 	// Send to specific server
 	serverAddr := &net.UDPAddr{
 		IP:   parsedServerIP,
-		Port: dhcpServerPort,
+		Port: ServerPort,
 	}
 
 	_, err = conn.WriteTo(packet, serverAddr)
@@ -488,7 +482,7 @@ func (d *DHCPDiscovery) SendDHCPInformToServer(ctx context.Context, clientIP, se
 	}
 
 	// Read response
-	response := make([]byte, dhcpMaxMsgSize)
+	response := make([]byte, MaxMsgSize)
 	xid := binary.BigEndian.Uint32(packet[4:8])
 
 	for {
@@ -521,12 +515,12 @@ func (d *DHCPDiscovery) SendDHCPInformToServer(ctx context.Context, clientIP, se
 
 		// Verify magic cookie
 		cookie := binary.BigEndian.Uint32(response[236:240])
-		if cookie != dhcpMagicCookie {
+		if cookie != MagicCookie {
 			continue
 		}
 
 		result.ServerIP = serverIP
-		d.parseDHCPOptions(response[:n], result)
+		d.parseOptions(response[:n], result)
 		return result, nil
 	}
 }

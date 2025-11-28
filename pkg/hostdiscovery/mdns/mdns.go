@@ -1,4 +1,4 @@
-// Package hostdiscovery: mDNS (Multicast DNS / Bonjour / Avahi) discovery.
+// Package mdns provides mDNS (Multicast DNS / Bonjour / Avahi) discovery.
 // mDNS is commonly used by:
 //   - macOS/iOS (Bonjour)
 //   - Linux (Avahi)
@@ -6,7 +6,7 @@
 //   - IoT devices (Chromecast, smart home devices, printers)
 //
 // Uses github.com/miekg/dns for proper DNS packet handling.
-package hostdiscovery
+package mdns
 
 import (
 	"context"
@@ -20,21 +20,34 @@ import (
 )
 
 const (
-	mdnsPort          = 5353
-	mdnsMulticastAddr = "224.0.0.251"
-	mdnsTimeout       = 3 * time.Second
+	// Port is the mDNS port
+	Port = 5353
+	// MulticastAddr is the mDNS multicast address
+	MulticastAddr = "224.0.0.251"
+	// DefaultTimeout is the default timeout for mDNS lookups
+	DefaultTimeout = 3 * time.Second
 )
 
-// MDNSResult contains the result of an mDNS lookup.
-type MDNSResult struct {
+// DebugLogger is a callback for debug logging.
+// Set this to receive debug messages from mDNS operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
+// Result contains the result of an mDNS lookup.
+type Result struct {
 	IP       string
 	Hostname string
-	Services []MDNSService
+	Services []Service
 	Error    error
 }
 
-// MDNSService represents a discovered mDNS service.
-type MDNSService struct {
+// Service represents a discovered mDNS service.
+type Service struct {
 	Instance string            // e.g., "Living Room Speaker"
 	Service  string            // e.g., "_googlecast._tcp"
 	Domain   string            // e.g., "local"
@@ -42,20 +55,20 @@ type MDNSService struct {
 	TXT      map[string]string // TXT record key-value pairs
 }
 
-// MDNSDiscovery performs mDNS-based hostname and service discovery.
-type MDNSDiscovery struct {
+// Discovery performs mDNS-based hostname and service discovery.
+type Discovery struct {
 	Timeout time.Duration
 }
 
-// NewMDNSDiscovery creates a new mDNS discovery helper with defaults.
-func NewMDNSDiscovery() *MDNSDiscovery {
-	return &MDNSDiscovery{Timeout: mdnsTimeout}
+// NewDiscovery creates a new mDNS discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{Timeout: DefaultTimeout}
 }
 
 // LookupAddr queries a specific IP for its mDNS hostname.
 // It tries both multicast (for Avahi/Bonjour) and unicast queries.
-func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult, error) {
-	res := &MDNSResult{IP: ip}
+func (m *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) {
+	res := &Result{IP: ip}
 
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -76,21 +89,24 @@ func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult,
 	// Try multicast first (works with Avahi on Linux, Bonjour on macOS)
 	if hostname := m.queryMulticast(ctx, reverseName, parsedIP); hostname != "" {
 		res.Hostname = hostname
+		debugLog("%s -> %s (multicast)", ip, hostname)
 		return res, nil
 	}
 
 	// Fallback to unicast query directly to the host
 	if hostname := m.queryUnicast(ctx, reverseName, parsedIP); hostname != "" {
 		res.Hostname = hostname
+		debugLog("%s -> %s (unicast)", ip, hostname)
 		return res, nil
 	}
 
 	res.Error = fmt.Errorf("no mDNS response from %s", ip)
+	debugLog("%s: no response", ip)
 	return res, res.Error
 }
 
 // queryMulticast sends an mDNS query to the multicast address and filters responses by IP.
-func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, targetIP net.IP) string {
+func (m *Discovery) queryMulticast(ctx context.Context, reverseName string, targetIP net.IP) string {
 	// Create PTR query message using miekg/dns
 	msg := new(dns.Msg)
 	msg.SetQuestion(reverseName, dns.TypePTR)
@@ -119,7 +135,7 @@ func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, 
 	_ = conn.SetDeadline(deadline)
 
 	// Send to multicast address
-	mcastAddr := &net.UDPAddr{IP: net.ParseIP(mdnsMulticastAddr), Port: mdnsPort}
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(MulticastAddr), Port: Port}
 	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return ""
 	}
@@ -145,7 +161,7 @@ func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, 
 }
 
 // queryUnicast sends an mDNS query directly to the target host.
-func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, targetIP net.IP) string {
+func (m *Discovery) queryUnicast(ctx context.Context, reverseName string, targetIP net.IP) string {
 	msg := new(dns.Msg)
 	msg.SetQuestion(reverseName, dns.TypePTR)
 	msg.RecursionDesired = false
@@ -168,7 +184,7 @@ func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, ta
 	_ = conn.SetDeadline(deadline)
 
 	// Send unicast query directly to the host
-	addr := &net.UDPAddr{IP: targetIP, Port: mdnsPort}
+	addr := &net.UDPAddr{IP: targetIP, Port: Port}
 	if _, err := conn.WriteTo(data, addr); err != nil {
 		return ""
 	}
@@ -183,7 +199,7 @@ func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, ta
 }
 
 // parsePTRResponse parses an mDNS PTR response using miekg/dns.
-func (m *MDNSDiscovery) parsePTRResponse(data []byte) string {
+func (m *Discovery) parsePTRResponse(data []byte) string {
 	msg := new(dns.Msg)
 	if err := msg.Unpack(data); err != nil {
 		return ""
@@ -212,7 +228,7 @@ func (m *MDNSDiscovery) parsePTRResponse(data []byte) string {
 //   - "_printer._tcp" - Printers
 //   - "_ssh._tcp" - SSH servers
 //   - "_smb._tcp" - SMB/Windows shares
-func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) ([]MDNSService, error) {
+func (m *Discovery) BrowseServices(ctx context.Context, serviceType string) ([]Service, error) {
 	// Ensure proper DNS format with trailing dot
 	if !strings.HasSuffix(serviceType, ".local.") {
 		if strings.HasSuffix(serviceType, ".local") {
@@ -244,13 +260,13 @@ func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) 
 	_ = conn.SetDeadline(deadline)
 
 	// Send to multicast address
-	mcastAddr := &net.UDPAddr{IP: net.ParseIP(mdnsMulticastAddr), Port: mdnsPort}
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(MulticastAddr), Port: Port}
 	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
 	// Collect responses until timeout
-	var services []MDNSService
+	var services []Service
 	buf := make([]byte, 4096)
 	for {
 		n, _, err := conn.ReadFrom(buf)
@@ -267,7 +283,7 @@ func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) 
 		for _, rr := range respMsg.Answer {
 			if ptr, ok := rr.(*dns.PTR); ok {
 				instanceName := strings.TrimSuffix(ptr.Ptr, ".")
-				services = append(services, MDNSService{
+				services = append(services, Service{
 					Instance: instanceName,
 					Service:  strings.TrimSuffix(serviceType, "."),
 					Domain:   "local",
@@ -307,12 +323,12 @@ func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) 
 }
 
 // LookupMultiple performs mDNS lookups on multiple IPs concurrently.
-func (m *MDNSDiscovery) LookupMultiple(ctx context.Context, ips []string) []*MDNSResult {
+func (m *Discovery) LookupMultiple(ctx context.Context, ips []string) []*Result {
 	if len(ips) == 0 {
 		return nil
 	}
 
-	results := make([]*MDNSResult, len(ips))
+	results := make([]*Result, len(ips))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 50) // Limit concurrency for mDNS
 

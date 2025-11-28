@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery/osdetect"
 )
 
 // MultiDiscoveryOptions configures the unified discovery behavior.
@@ -24,6 +26,10 @@ type MultiDiscoveryOptions struct {
 	EnableSSDP bool
 	// EnableARP enables ARP-based MAC address discovery
 	EnableARP bool
+	// EnableTCPFP enables TCP/IP fingerprinting for OS detection (last resort)
+	EnableTCPFP bool
+	// TCPFPPort is the port used for TCP fingerprinting (default: 80)
+	TCPFPPort int
 
 	// TCPPorts for TCP scanning (default: 80,443,22,3389)
 	TCPPorts []int
@@ -43,6 +49,8 @@ func DefaultMultiDiscoveryOptions() MultiDiscoveryOptions {
 		EnableLLMNR:   true,
 		EnableSSDP:    true,
 		EnableARP:     true,
+		EnableTCPFP:   false, // Disabled by default - requires elevated privileges
+		TCPFPPort:     80,
 		TCPPorts:      []int{80, 443, 22, 3389},
 		Timeout:       2 * time.Second,
 		Workers:       256,
@@ -51,13 +59,17 @@ func DefaultMultiDiscoveryOptions() MultiDiscoveryOptions {
 
 // MultiDiscoveryResult contains consolidated discovery results for a host.
 type MultiDiscoveryResult struct {
-	IP        string
-	IsUp      bool
-	Hostnames map[DiscoveryMethod]string
-	MAC       string
-	Vendor    string // MAC vendor/manufacturer name
-	Services  []ServiceInfo
-	Errors    map[DiscoveryMethod]error
+	IP         string
+	IsUp       bool
+	Hostnames  map[DiscoveryMethod]string
+	MAC        string
+	Vendor     string // MAC vendor/manufacturer name
+	Services   []ServiceInfo
+	OS         string  // Detected operating system (from TCP fingerprinting)
+	OSVersion  string  // Detected OS version
+	DeviceType string  // Device type (e.g., "router", "printer", "general purpose")
+	OSConfidence float64 // Confidence score (0.0 - 1.0)
+	Errors     map[DiscoveryMethod]error
 }
 
 // PrimaryHostname returns the best hostname found, preferring certain methods.
@@ -278,6 +290,53 @@ func (m *MultiDiscovery) ResolveBatch(ctx context.Context, ips []string) ([]*Mul
 			}
 			debugLog(MethodARP, "Completed: %d/%d MAC addresses found", found, len(ips))
 			mu.Unlock()
+		}()
+	}
+
+	// TCP/IP fingerprinting for OS detection (runs sequentially - requires raw sockets)
+	if m.Options.EnableTCPFP {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			debugLog(MethodTCPFP, "Starting TCP/IP fingerprinting for %d IPs", len(ips))
+			fp := osdetect.NewTCPFPDiscovery()
+			fp.Timeout = m.Options.Timeout
+			
+			found := 0
+			for i, ip := range ips {
+				select {
+				case <-ctx.Done():
+					debugLog(MethodTCPFP, "Context cancelled, stopping fingerprinting")
+					return
+				default:
+				}
+				
+				var result *osdetect.TCPFPResult
+				var err error
+				if m.Options.TCPFPPort > 0 {
+					result, err = fp.Fingerprint(ctx, ip, m.Options.TCPFPPort)
+				} else {
+					result, err = fp.FingerprintBest(ctx, ip)
+				}
+				
+				if err == nil && result != nil && result.OSGuess != "" {
+					mu.Lock()
+					results[i].OS = result.OSGuess
+					results[i].OSVersion = result.OSFamily
+					results[i].DeviceType = result.DeviceType
+					results[i].OSConfidence = float64(result.Confidence) / 100.0
+					found++
+					debugLogVerbose(MethodTCPFP, "%s -> OS: %s %s (confidence: %d%%)", 
+						ip, result.OSGuess, result.OSFamily, result.Confidence)
+					mu.Unlock()
+				} else if err != nil {
+					mu.Lock()
+					results[i].Errors[MethodTCPFP] = err
+					debugLogVerbose(MethodTCPFP, "%s: error: %v", ip, err)
+					mu.Unlock()
+				}
+			}
+			debugLog(MethodTCPFP, "Completed: %d/%d OS fingerprints found", found, len(ips))
 		}()
 	}
 

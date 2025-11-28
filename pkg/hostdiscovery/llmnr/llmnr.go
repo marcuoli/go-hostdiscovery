@@ -1,4 +1,4 @@
-// Package hostdiscovery: LLMNR (Link-Local Multicast Name Resolution) discovery.
+// Package llmnr provides LLMNR (Link-Local Multicast Name Resolution) discovery.
 // LLMNR is commonly used by:
 //   - Windows Vista and later
 //   - Linux with systemd-resolved
@@ -6,7 +6,7 @@
 //
 // It resolves hostnames on the local network without a DNS server.
 // Uses github.com/miekg/dns for proper DNS packet handling.
-package hostdiscovery
+package llmnr
 
 import (
 	"context"
@@ -19,34 +19,47 @@ import (
 )
 
 const (
-	llmnrPort          = 5355
-	llmnrMulticastAddr = "224.0.0.252"
-	llmnrTimeout       = 2 * time.Second
+	// Port is the LLMNR port
+	Port = 5355
+	// MulticastAddr is the LLMNR multicast address
+	MulticastAddr = "224.0.0.252"
+	// DefaultTimeout is the default timeout for LLMNR lookups
+	DefaultTimeout = 2 * time.Second
 )
 
-// LLMNRResult contains the result of an LLMNR lookup.
-type LLMNRResult struct {
+// DebugLogger is a callback for debug logging.
+// Set this to receive debug messages from LLMNR operations.
+var DebugLogger func(format string, args ...interface{})
+
+func debugLog(format string, args ...interface{}) {
+	if DebugLogger != nil {
+		DebugLogger(format, args...)
+	}
+}
+
+// Result contains the result of an LLMNR lookup.
+type Result struct {
 	IP       string
 	Hostname string
 	Error    error
 }
 
-// LLMNRDiscovery performs LLMNR-based hostname discovery.
-type LLMNRDiscovery struct {
+// Discovery performs LLMNR-based hostname discovery.
+type Discovery struct {
 	Timeout time.Duration
 }
 
-// NewLLMNRDiscovery creates a new LLMNR discovery helper with defaults.
-func NewLLMNRDiscovery() *LLMNRDiscovery {
-	return &LLMNRDiscovery{Timeout: llmnrTimeout}
+// NewDiscovery creates a new LLMNR discovery helper with defaults.
+func NewDiscovery() *Discovery {
+	return &Discovery{Timeout: DefaultTimeout}
 }
 
 // LookupAddr performs a reverse LLMNR lookup for the given IP address.
 // LLMNR doesn't natively support reverse lookups, so we use multiple strategies:
 // 1. Multicast PTR query (some implementations respond)
 // 2. Direct unicast query to the host
-func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResult, error) {
-	res := &LLMNRResult{IP: ip}
+func (l *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) {
+	res := &Result{IP: ip}
 
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -66,21 +79,24 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 	// Try multicast PTR query first
 	if hostname := l.queryMulticastPTR(ctx, reverseName, parsedIP); hostname != "" {
 		res.Hostname = hostname
+		debugLog("%s -> %s (multicast)", ip, hostname)
 		return res, nil
 	}
 
 	// Try unicast PTR query directly to host
 	if hostname := l.queryUnicastPTR(ctx, reverseName, parsedIP); hostname != "" {
 		res.Hostname = hostname
+		debugLog("%s -> %s (unicast)", ip, hostname)
 		return res, nil
 	}
 
 	res.Error = fmt.Errorf("no LLMNR response from %s", ip)
+	debugLog("%s: no response", ip)
 	return res, res.Error
 }
 
 // queryMulticastPTR sends a PTR query to the LLMNR multicast address using miekg/dns.
-func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
+func (l *Discovery) queryMulticastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
 	// Create PTR query message
 	msg := new(dns.Msg)
 	msg.SetQuestion(reverseName, dns.TypePTR)
@@ -108,7 +124,7 @@ func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName stri
 	_ = conn.SetDeadline(deadline)
 
 	// Send to multicast
-	mcastAddr := &net.UDPAddr{IP: net.ParseIP(llmnrMulticastAddr), Port: llmnrPort}
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(MulticastAddr), Port: Port}
 	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return ""
 	}
@@ -133,7 +149,7 @@ func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName stri
 }
 
 // queryUnicastPTR sends a PTR query directly to the target host.
-func (l *LLMNRDiscovery) queryUnicastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
+func (l *Discovery) queryUnicastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
 	msg := new(dns.Msg)
 	msg.SetQuestion(reverseName, dns.TypePTR)
 	msg.RecursionDesired = false
@@ -155,7 +171,7 @@ func (l *LLMNRDiscovery) queryUnicastPTR(ctx context.Context, reverseName string
 	}
 	_ = conn.SetDeadline(deadline)
 
-	addr := &net.UDPAddr{IP: targetIP, Port: llmnrPort}
+	addr := &net.UDPAddr{IP: targetIP, Port: Port}
 	if _, err := conn.WriteTo(data, addr); err != nil {
 		return ""
 	}
@@ -170,7 +186,7 @@ func (l *LLMNRDiscovery) queryUnicastPTR(ctx context.Context, reverseName string
 }
 
 // parsePTRResponse parses an LLMNR PTR response using miekg/dns.
-func (l *LLMNRDiscovery) parsePTRResponse(data []byte) string {
+func (l *Discovery) parsePTRResponse(data []byte) string {
 	msg := new(dns.Msg)
 	if err := msg.Unpack(data); err != nil {
 		return ""
@@ -197,7 +213,7 @@ func (l *LLMNRDiscovery) parsePTRResponse(data []byte) string {
 }
 
 // LookupName resolves a hostname to an IP using LLMNR multicast.
-func (l *LLMNRDiscovery) LookupName(ctx context.Context, name string) ([]net.IP, error) {
+func (l *Discovery) LookupName(ctx context.Context, name string) ([]net.IP, error) {
 	// Ensure name ends with dot for DNS
 	if len(name) > 0 && name[len(name)-1] != '.' {
 		name = name + "."
@@ -224,7 +240,7 @@ func (l *LLMNRDiscovery) LookupName(ctx context.Context, name string) ([]net.IP,
 	}
 	_ = conn.SetDeadline(deadline)
 
-	mcastAddr := &net.UDPAddr{IP: net.ParseIP(llmnrMulticastAddr), Port: llmnrPort}
+	mcastAddr := &net.UDPAddr{IP: net.ParseIP(MulticastAddr), Port: Port}
 	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
@@ -257,12 +273,12 @@ func (l *LLMNRDiscovery) LookupName(ctx context.Context, name string) ([]net.IP,
 }
 
 // LookupMultiple performs LLMNR lookups on multiple IPs concurrently.
-func (l *LLMNRDiscovery) LookupMultiple(ctx context.Context, ips []string) []*LLMNRResult {
+func (l *Discovery) LookupMultiple(ctx context.Context, ips []string) []*Result {
 	if len(ips) == 0 {
 		return nil
 	}
 
-	results := make([]*LLMNRResult, len(ips))
+	results := make([]*Result, len(ips))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 50)
 

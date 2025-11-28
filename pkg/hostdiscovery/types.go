@@ -29,6 +29,7 @@ const (
 	MethodFinger  DiscoveryMethod = "finger" // Finger Protocol (RFC 1288)
 	MethodARP     DiscoveryMethod = "arp"    // ARP for MAC address discovery
 	MethodVendor  DiscoveryMethod = "vendor" // MAC vendor lookup (OUI)
+	MethodTCPFP   DiscoveryMethod = "tcpfp"  // TCP/IP passive fingerprinting
 )
 
 // HostInfo contains consolidated information about a discovered host.

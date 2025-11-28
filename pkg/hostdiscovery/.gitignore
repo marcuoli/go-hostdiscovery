@@ -1,0 +1,6 @@
+# Test data directory
+testdata/
+
+# Except for example test configuration (keep test.example.env)
+!testdata/test.example.env
+!testdata/*.txt
