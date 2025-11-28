@@ -4,17 +4,19 @@
 //   - Linux (Avahi)
 //   - Android
 //   - IoT devices (Chromecast, smart home devices, printers)
+//
+// Uses github.com/miekg/dns for proper DNS packet handling.
 package hostdiscovery
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -67,9 +69,9 @@ func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult,
 		return res, res.Error
 	}
 
-	// Build reverse DNS name for PTR query
-	// e.g., 192.168.1.100 -> 100.1.168.192.in-addr.arpa
-	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
+	// Build reverse DNS name for PTR query (must end with dot for miekg/dns)
+	// e.g., 192.168.1.100 -> 100.1.168.192.in-addr.arpa.
+	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa.", ip4[3], ip4[2], ip4[1], ip4[0])
 
 	// Try multicast first (works with Avahi on Linux, Bonjour on macOS)
 	if hostname := m.queryMulticast(ctx, reverseName, parsedIP); hostname != "" {
@@ -89,6 +91,16 @@ func (m *MDNSDiscovery) LookupAddr(ctx context.Context, ip string) (*MDNSResult,
 
 // queryMulticast sends an mDNS query to the multicast address and filters responses by IP.
 func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, targetIP net.IP) string {
+	// Create PTR query message using miekg/dns
+	msg := new(dns.Msg)
+	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.RecursionDesired = false // mDNS doesn't use recursion
+
+	data, err := msg.Pack()
+	if err != nil {
+		return ""
+	}
+
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return ""
@@ -108,8 +120,7 @@ func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, 
 
 	// Send to multicast address
 	mcastAddr := &net.UDPAddr{IP: net.ParseIP(mdnsMulticastAddr), Port: mdnsPort}
-	query := buildMDNSQuery(reverseName, 12) // Type PTR = 12
-	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return ""
 	}
 
@@ -124,8 +135,8 @@ func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, 
 		// Check if response is from our target IP
 		if udpAddr, ok := from.(*net.UDPAddr); ok {
 			if udpAddr.IP.Equal(targetIP) {
-				if hostname := parseMDNSPTRResponse(buf[:n]); hostname != "" {
-					return strings.TrimSuffix(hostname, ".")
+				if hostname := m.parsePTRResponse(buf[:n]); hostname != "" {
+					return hostname
 				}
 			}
 		}
@@ -135,6 +146,15 @@ func (m *MDNSDiscovery) queryMulticast(ctx context.Context, reverseName string, 
 
 // queryUnicast sends an mDNS query directly to the target host.
 func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, targetIP net.IP) string {
+	msg := new(dns.Msg)
+	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.RecursionDesired = false
+
+	data, err := msg.Pack()
+	if err != nil {
+		return ""
+	}
+
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return ""
@@ -149,8 +169,7 @@ func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, ta
 
 	// Send unicast query directly to the host
 	addr := &net.UDPAddr{IP: targetIP, Port: mdnsPort}
-	query := buildMDNSQuery(reverseName, 12) // Type PTR = 12
-	if _, err := conn.WriteTo(query, addr); err != nil {
+	if _, err := conn.WriteTo(data, addr); err != nil {
 		return ""
 	}
 
@@ -160,9 +179,28 @@ func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, ta
 		return ""
 	}
 
-	if hostname := parseMDNSPTRResponse(buf[:n]); hostname != "" {
-		return strings.TrimSuffix(hostname, ".")
+	return m.parsePTRResponse(buf[:n])
+}
+
+// parsePTRResponse parses an mDNS PTR response using miekg/dns.
+func (m *MDNSDiscovery) parsePTRResponse(data []byte) string {
+	msg := new(dns.Msg)
+	if err := msg.Unpack(data); err != nil {
+		return ""
 	}
+
+	// Look for PTR records in answers
+	for _, rr := range msg.Answer {
+		if ptr, ok := rr.(*dns.PTR); ok {
+			hostname := ptr.Ptr
+			// Remove trailing dot
+			if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
+				hostname = hostname[:len(hostname)-1]
+			}
+			return hostname
+		}
+	}
+
 	return ""
 }
 
@@ -175,8 +213,22 @@ func (m *MDNSDiscovery) queryUnicast(ctx context.Context, reverseName string, ta
 //   - "_ssh._tcp" - SSH servers
 //   - "_smb._tcp" - SMB/Windows shares
 func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) ([]MDNSService, error) {
-	if !strings.HasSuffix(serviceType, ".local") {
-		serviceType = serviceType + ".local"
+	// Ensure proper DNS format with trailing dot
+	if !strings.HasSuffix(serviceType, ".local.") {
+		if strings.HasSuffix(serviceType, ".local") {
+			serviceType = serviceType + "."
+		} else {
+			serviceType = serviceType + ".local."
+		}
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(serviceType, dns.TypePTR)
+	msg.RecursionDesired = false
+
+	data, err := msg.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack query: %w", err)
 	}
 
 	conn, err := net.ListenPacket("udp4", ":0")
@@ -193,8 +245,7 @@ func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) 
 
 	// Send to multicast address
 	mcastAddr := &net.UDPAddr{IP: net.ParseIP(mdnsMulticastAddr), Port: mdnsPort}
-	query := buildMDNSQuery(serviceType, 12) // Type PTR = 12
-	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
@@ -206,8 +257,49 @@ func (m *MDNSDiscovery) BrowseServices(ctx context.Context, serviceType string) 
 		if err != nil {
 			break // Timeout or error
 		}
-		if svc := parseMDNSServiceResponse(buf[:n]); svc != nil {
-			services = append(services, *svc)
+
+		respMsg := new(dns.Msg)
+		if err := respMsg.Unpack(buf[:n]); err != nil {
+			continue
+		}
+
+		// Extract service instances from PTR records
+		for _, rr := range respMsg.Answer {
+			if ptr, ok := rr.(*dns.PTR); ok {
+				instanceName := strings.TrimSuffix(ptr.Ptr, ".")
+				services = append(services, MDNSService{
+					Instance: instanceName,
+					Service:  strings.TrimSuffix(serviceType, "."),
+					Domain:   "local",
+				})
+			}
+		}
+
+		// Also look for SRV records for port info
+		for _, rr := range respMsg.Extra {
+			if srv, ok := rr.(*dns.SRV); ok {
+				// Find and update matching service
+				for i := range services {
+					if strings.Contains(srv.Hdr.Name, services[i].Instance) {
+						services[i].Port = int(srv.Port)
+					}
+				}
+			}
+			// Parse TXT records
+			if txt, ok := rr.(*dns.TXT); ok {
+				for i := range services {
+					if strings.Contains(txt.Hdr.Name, services[i].Instance) {
+						if services[i].TXT == nil {
+							services[i].TXT = make(map[string]string)
+						}
+						for _, t := range txt.Txt {
+							if parts := strings.SplitN(t, "=", 2); len(parts) == 2 {
+								services[i].TXT[parts[0]] = parts[1]
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -237,165 +329,4 @@ func (m *MDNSDiscovery) LookupMultiple(ctx context.Context, ips []string) []*MDN
 
 	wg.Wait()
 	return results
-}
-
-// buildMDNSQuery creates a simple DNS query packet.
-func buildMDNSQuery(name string, qtype uint16) []byte {
-	var buf bytes.Buffer
-
-	// Transaction ID (random-ish for unicast, 0 for multicast)
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0x0001))
-	// Flags: standard query
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0x0000))
-	// Questions: 1
-	_ = binary.Write(&buf, binary.BigEndian, uint16(1))
-	// Answer, Authority, Additional: 0
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-
-	// Encode DNS name
-	for _, label := range strings.Split(name, ".") {
-		if len(label) == 0 {
-			continue
-		}
-		buf.WriteByte(byte(len(label)))
-		buf.WriteString(label)
-	}
-	buf.WriteByte(0) // End of name
-
-	// Type and Class
-	_ = binary.Write(&buf, binary.BigEndian, qtype)
-	_ = binary.Write(&buf, binary.BigEndian, uint16(1)) // Class IN
-
-	return buf.Bytes()
-}
-
-// parseMDNSPTRResponse extracts a PTR hostname from a DNS response.
-func parseMDNSPTRResponse(data []byte) string {
-	if len(data) < 12 {
-		return ""
-	}
-
-	// Skip header, find answer section
-	// Simple parsing: look for PTR record type (12) in answers
-	ancount := binary.BigEndian.Uint16(data[6:8])
-	if ancount == 0 {
-		return ""
-	}
-
-	// Skip question section (simplified: assume one question)
-	offset := 12
-	for offset < len(data) && data[offset] != 0 {
-		labelLen := int(data[offset])
-		offset += labelLen + 1
-	}
-	offset += 5 // null byte + QTYPE (2) + QCLASS (2)
-
-	// Parse first answer
-	if offset >= len(data) {
-		return ""
-	}
-
-	// Skip name (may be compressed)
-	offset = skipDNSName(data, offset)
-	if offset+10 > len(data) {
-		return ""
-	}
-
-	rtype := binary.BigEndian.Uint16(data[offset : offset+2])
-	if rtype != 12 { // Not PTR
-		return ""
-	}
-	offset += 8 // Type(2) + Class(2) + TTL(4)
-	rdlength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-
-	if offset+rdlength > len(data) {
-		return ""
-	}
-
-	// Extract PTR name
-	return extractDNSName(data, offset)
-}
-
-// parseMDNSServiceResponse parses a service discovery response.
-func parseMDNSServiceResponse(data []byte) *MDNSService {
-	if len(data) < 12 {
-		return nil
-	}
-
-	ancount := binary.BigEndian.Uint16(data[6:8])
-	if ancount == 0 {
-		return nil
-	}
-
-	// Simple extraction: find instance name from PTR record
-	offset := 12
-	for offset < len(data) && data[offset] != 0 {
-		offset += int(data[offset]) + 1
-	}
-	offset += 5
-
-	if offset >= len(data) {
-		return nil
-	}
-
-	offset = skipDNSName(data, offset)
-	if offset+10 > len(data) {
-		return nil
-	}
-
-	rtype := binary.BigEndian.Uint16(data[offset : offset+2])
-	if rtype != 12 {
-		return nil
-	}
-	offset += 8
-	rdlength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-
-	if offset+rdlength > len(data) {
-		return nil
-	}
-
-	instanceName := extractDNSName(data, offset)
-	if instanceName == "" {
-		return nil
-	}
-
-	return &MDNSService{
-		Instance: instanceName,
-		Domain:   "local",
-	}
-}
-
-func skipDNSName(data []byte, offset int) int {
-	for offset < len(data) {
-		if data[offset] == 0 {
-			return offset + 1
-		}
-		if data[offset]&0xC0 == 0xC0 { // Compression pointer
-			return offset + 2
-		}
-		offset += int(data[offset]) + 1
-	}
-	return offset
-}
-
-func extractDNSName(data []byte, offset int) string {
-	var parts []string
-	for offset < len(data) && data[offset] != 0 {
-		if data[offset]&0xC0 == 0xC0 { // Compression pointer
-			ptr := int(binary.BigEndian.Uint16(data[offset:offset+2])) & 0x3FFF
-			return strings.Join(append(parts, extractDNSName(data, ptr)), ".")
-		}
-		labelLen := int(data[offset])
-		offset++
-		if offset+labelLen > len(data) {
-			break
-		}
-		parts = append(parts, string(data[offset:offset+labelLen]))
-		offset += labelLen
-	}
-	return strings.Join(parts, ".")
 }

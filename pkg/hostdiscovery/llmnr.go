@@ -5,17 +5,17 @@
 //   - Some Android devices
 //
 // It resolves hostnames on the local network without a DNS server.
+// Uses github.com/miekg/dns for proper DNS packet handling.
 package hostdiscovery
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -60,8 +60,8 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 		return res, res.Error
 	}
 
-	// Build reverse name for PTR query
-	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
+	// Build reverse name for PTR query (must end with dot for miekg/dns)
+	reverseName := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa.", ip4[3], ip4[2], ip4[1], ip4[0])
 
 	// Try multicast PTR query first
 	if hostname := l.queryMulticastPTR(ctx, reverseName, parsedIP); hostname != "" {
@@ -69,8 +69,8 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 		return res, nil
 	}
 
-	// Try unicast query directly to host
-	if hostname := l.queryUnicast(ctx, parsedIP); hostname != "" {
+	// Try unicast PTR query directly to host
+	if hostname := l.queryUnicastPTR(ctx, reverseName, parsedIP); hostname != "" {
 		res.Hostname = hostname
 		return res, nil
 	}
@@ -79,8 +79,18 @@ func (l *LLMNRDiscovery) LookupAddr(ctx context.Context, ip string) (*LLMNRResul
 	return res, res.Error
 }
 
-// queryMulticastPTR sends a PTR query to the LLMNR multicast address.
+// queryMulticastPTR sends a PTR query to the LLMNR multicast address using miekg/dns.
 func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
+	// Create PTR query message
+	msg := new(dns.Msg)
+	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.RecursionDesired = false // LLMNR doesn't use recursion
+
+	data, err := msg.Pack()
+	if err != nil {
+		return ""
+	}
+
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return ""
@@ -97,23 +107,23 @@ func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName stri
 	}
 	_ = conn.SetDeadline(deadline)
 
-	// Send PTR query to multicast
+	// Send to multicast
 	mcastAddr := &net.UDPAddr{IP: net.ParseIP(llmnrMulticastAddr), Port: llmnrPort}
-	query := buildLLMNRQuery(reverseName, 12) // Type PTR
-	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return ""
 	}
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	for {
 		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
 			break
 		}
 
+		// Check if response is from our target IP
 		if udpAddr, ok := from.(*net.UDPAddr); ok {
 			if udpAddr.IP.Equal(targetIP) {
-				if hostname := parseLLMNRResponse(buf[:n]); hostname != "" {
+				if hostname := l.parsePTRResponse(buf[:n]); hostname != "" {
 					return hostname
 				}
 			}
@@ -122,8 +132,17 @@ func (l *LLMNRDiscovery) queryMulticastPTR(ctx context.Context, reverseName stri
 	return ""
 }
 
-// queryUnicast sends a direct query to the host asking for its hostname.
-func (l *LLMNRDiscovery) queryUnicast(ctx context.Context, targetIP net.IP) string {
+// queryUnicastPTR sends a PTR query directly to the target host.
+func (l *LLMNRDiscovery) queryUnicastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
+	msg := new(dns.Msg)
+	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.RecursionDesired = false
+
+	data, err := msg.Pack()
+	if err != nil {
+		return ""
+	}
+
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return ""
@@ -136,26 +155,63 @@ func (l *LLMNRDiscovery) queryUnicast(ctx context.Context, targetIP net.IP) stri
 	}
 	_ = conn.SetDeadline(deadline)
 
-	// Try with WPAD name first (commonly responds), then generic names
 	addr := &net.UDPAddr{IP: targetIP, Port: llmnrPort}
-	
-	// Send query - some hosts respond to ANY queries with their name
-	query := buildLLMNRQuery("*", 255) // Type ANY
-	if _, err := conn.WriteTo(query, addr); err != nil {
+	if _, err := conn.WriteTo(data, addr); err != nil {
 		return ""
 	}
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
 		return ""
 	}
 
-	return parseLLMNRResponse(buf[:n])
+	return l.parsePTRResponse(buf[:n])
+}
+
+// parsePTRResponse parses an LLMNR PTR response using miekg/dns.
+func (l *LLMNRDiscovery) parsePTRResponse(data []byte) string {
+	msg := new(dns.Msg)
+	if err := msg.Unpack(data); err != nil {
+		return ""
+	}
+
+	// Check if this is a response
+	if !msg.Response {
+		return ""
+	}
+
+	// Look for PTR records in answers
+	for _, rr := range msg.Answer {
+		if ptr, ok := rr.(*dns.PTR); ok {
+			hostname := ptr.Ptr
+			// Remove trailing dot
+			if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
+				hostname = hostname[:len(hostname)-1]
+			}
+			return hostname
+		}
+	}
+
+	return ""
 }
 
 // LookupName resolves a hostname to an IP using LLMNR multicast.
 func (l *LLMNRDiscovery) LookupName(ctx context.Context, name string) ([]net.IP, error) {
+	// Ensure name ends with dot for DNS
+	if len(name) > 0 && name[len(name)-1] != '.' {
+		name = name + "."
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(name, dns.TypeA)
+	msg.RecursionDesired = false
+
+	data, err := msg.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack query: %w", err)
+	}
+
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
 		return nil, fmt.Errorf("udp listen: %w", err)
@@ -169,20 +225,31 @@ func (l *LLMNRDiscovery) LookupName(ctx context.Context, name string) ([]net.IP,
 	_ = conn.SetDeadline(deadline)
 
 	mcastAddr := &net.UDPAddr{IP: net.ParseIP(llmnrMulticastAddr), Port: llmnrPort}
-	query := buildLLMNRQuery(name, 1) // Type A
-	if _, err := conn.WriteTo(query, mcastAddr); err != nil {
+	if _, err := conn.WriteTo(data, mcastAddr); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
 	var ips []net.IP
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	for {
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
 			break
 		}
-		if ip := parseLLMNRARecord(buf[:n]); ip != nil {
-			ips = append(ips, ip)
+
+		respMsg := new(dns.Msg)
+		if err := respMsg.Unpack(buf[:n]); err != nil {
+			continue
+		}
+
+		if !respMsg.Response {
+			continue
+		}
+
+		for _, rr := range respMsg.Answer {
+			if a, ok := rr.(*dns.A); ok {
+				ips = append(ips, a.A)
+			}
 		}
 	}
 
@@ -212,124 +279,4 @@ func (l *LLMNRDiscovery) LookupMultiple(ctx context.Context, ips []string) []*LL
 
 	wg.Wait()
 	return results
-}
-
-func buildLLMNRQuery(name string, qtype uint16) []byte {
-	var buf bytes.Buffer
-
-	// Transaction ID
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0x4242))
-	// Flags: standard query, recursion not desired for LLMNR
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0x0000))
-	// Questions: 1
-	_ = binary.Write(&buf, binary.BigEndian, uint16(1))
-	// Answer, Authority, Additional: 0
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-	_ = binary.Write(&buf, binary.BigEndian, uint16(0))
-
-	// Encode DNS-style name
-	for _, label := range strings.Split(name, ".") {
-		if len(label) == 0 {
-			continue
-		}
-		buf.WriteByte(byte(len(label)))
-		buf.WriteString(label)
-	}
-	buf.WriteByte(0)
-
-	// Type and Class
-	_ = binary.Write(&buf, binary.BigEndian, qtype)
-	_ = binary.Write(&buf, binary.BigEndian, uint16(1)) // Class IN
-
-	return buf.Bytes()
-}
-
-func parseLLMNRResponse(data []byte) string {
-	if len(data) < 12 {
-		return ""
-	}
-
-	// Check if this is a response (QR bit set)
-	flags := binary.BigEndian.Uint16(data[2:4])
-	if flags&0x8000 == 0 {
-		return "" // Not a response
-	}
-
-	ancount := binary.BigEndian.Uint16(data[6:8])
-	if ancount == 0 {
-		return ""
-	}
-
-	// Extract name from question section
-	offset := 12
-	var parts []string
-	for offset < len(data) && data[offset] != 0 {
-		labelLen := int(data[offset])
-		offset++
-		if offset+labelLen > len(data) {
-			break
-		}
-		parts = append(parts, string(data[offset:offset+labelLen]))
-		offset += labelLen
-	}
-
-	if len(parts) > 0 {
-		return strings.Join(parts, ".")
-	}
-	return ""
-}
-
-func parseLLMNRARecord(data []byte) net.IP {
-	if len(data) < 12 {
-		return nil
-	}
-
-	flags := binary.BigEndian.Uint16(data[2:4])
-	if flags&0x8000 == 0 {
-		return nil
-	}
-
-	ancount := binary.BigEndian.Uint16(data[6:8])
-	if ancount == 0 {
-		return nil
-	}
-
-	// Skip question
-	offset := 12
-	for offset < len(data) && data[offset] != 0 {
-		offset += int(data[offset]) + 1
-	}
-	offset += 5 // null + type + class
-
-	// Skip answer name (may be compressed)
-	if offset >= len(data) {
-		return nil
-	}
-	if data[offset]&0xC0 == 0xC0 {
-		offset += 2
-	} else {
-		for offset < len(data) && data[offset] != 0 {
-			offset += int(data[offset]) + 1
-		}
-		offset++
-	}
-
-	if offset+10 > len(data) {
-		return nil
-	}
-
-	rtype := binary.BigEndian.Uint16(data[offset : offset+2])
-	if rtype != 1 { // Not A record
-		return nil
-	}
-	offset += 8 // type + class + ttl
-	rdlength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-
-	if rdlength == 4 && offset+4 <= len(data) {
-		return net.IPv4(data[offset], data[offset+1], data[offset+2], data[offset+3])
-	}
-
-	return nil
 }
