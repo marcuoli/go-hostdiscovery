@@ -64,7 +64,8 @@ func main() {
 	}
 
 	ctx := context.Background()
-	opts := hostdiscovery.Options{Ports: ports, Timeout: timeout, Workers: workers, Verbose: verbose}
+	opts := hostdiscovery.Options{Ports: ports, Timeout: timeout, Workers: workers}
+	_ = verbose // Reserved for future use
 	ips, err := hostdiscovery.Discover(ctx, cidr, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan error: %v\n", err)

@@ -1,6 +1,4 @@
-// Package hostdiscovery provides simple, concurrent host discovery over a CIDR
-// range using TCP connect probes. It does not require raw sockets or elevated
-// privileges and therefore works across platforms.
+// Package hostdiscovery: TCP connect-based host discovery.
 package hostdiscovery
 
 import (
@@ -11,39 +9,54 @@ import (
 	"time"
 )
 
-// Options configures the discovery behavior.
-type Options struct {
+// TCPOptions configures TCP-based host discovery behavior.
+type TCPOptions struct {
 	// Ports to probe on each host. At least one port is required.
 	Ports []int
 	// Timeout per TCP dial attempt.
 	Timeout time.Duration
 	// Workers controls the concurrency level.
 	Workers int
-	// Verbose is currently a no-op placeholder for future logging hooks.
-	Verbose bool
+}
+
+// TCPDiscovery performs TCP connect-based host discovery.
+type TCPDiscovery struct {
+	Options TCPOptions
+}
+
+// NewTCPDiscovery creates a new TCP discovery helper with defaults.
+func NewTCPDiscovery() *TCPDiscovery {
+	return &TCPDiscovery{
+		Options: TCPOptions{
+			Ports:   []int{80, 443, 22, 3389},
+			Timeout: 800 * time.Millisecond,
+			Workers: DefaultWorkers,
+		},
+	}
 }
 
 // Discover performs a TCP connect-based host discovery over the given CIDR.
 // A host is considered up if any of the provided ports accepts a TCP connection
 // within the timeout. The scan stops early for a host once one port is reachable.
-func Discover(ctx context.Context, cidr string, opts Options) ([]net.IP, error) {
-	_, ipnet, err := net.ParseCIDR(cidr)
+func (t *TCPDiscovery) Discover(ctx context.Context, cidr string) ([]net.IP, error) {
+	ips, err := EnumerateIPs(cidr)
 	if err != nil {
-		return nil, fmt.Errorf("parse CIDR: %w", err)
+		return nil, fmt.Errorf("enumerate IPs: %w", err)
 	}
-	if len(opts.Ports) == 0 {
-		return nil, fmt.Errorf("no ports provided")
-	}
-	if opts.Workers <= 0 {
-		opts.Workers = 256
-	}
-	if opts.Timeout <= 0 {
-		opts.Timeout = 800 * time.Millisecond
-	}
-
-	ips := enumerateIPs(ipnet)
 	if len(ips) == 0 {
 		return nil, nil
+	}
+	if len(t.Options.Ports) == 0 {
+		return nil, fmt.Errorf("no ports provided")
+	}
+
+	workers := t.Options.Workers
+	if workers <= 0 {
+		workers = DefaultWorkers
+	}
+	timeout := t.Options.Timeout
+	if timeout <= 0 {
+		timeout = 800 * time.Millisecond
 	}
 
 	jobs := make(chan net.IP, len(ips))
@@ -53,13 +66,13 @@ func Discover(ctx context.Context, cidr string, opts Options) ([]net.IP, error) 
 	worker := func() {
 		defer wg.Done()
 		for ip := range jobs {
-			if probeHost(ctx, ip, opts.Ports, opts.Timeout) {
+			if t.probeHost(ctx, ip, timeout) {
 				results <- ip
 			}
 		}
 	}
 
-	for i := 0; i < opts.Workers; i++ {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go worker()
 	}
@@ -83,27 +96,9 @@ enqueue:
 	return up, nil
 }
 
-func enumerateIPs(n *net.IPNet) []net.IP {
-	var res []net.IP
-	base := n.IP.To4()
-	if base == nil {
-		return res
-	}
-	mask := net.IP(n.Mask).To4()
-	if mask == nil {
-		return res
-	}
-	network := ipToUint32(base) & ipToUint32(mask)
-	broadcast := network | ^ipToUint32(mask)
-	for u := network + 1; u < broadcast; u++ {
-		res = append(res, uint32ToIP(u))
-	}
-	return res
-}
-
-func probeHost(ctx context.Context, ip net.IP, ports []int, timeout time.Duration) bool {
+func (t *TCPDiscovery) probeHost(ctx context.Context, ip net.IP, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
-	for _, p := range ports {
+	for _, p := range t.Options.Ports {
 		addr := fmt.Sprintf("%s:%d", ip.String(), p)
 		conn, err := d.DialContext(ctx, "tcp", addr)
 		if err == nil {
@@ -114,11 +109,13 @@ func probeHost(ctx context.Context, ip net.IP, ports []int, timeout time.Duratio
 	return false
 }
 
-func ipToUint32(ip net.IP) uint32 {
-	ip = ip.To4()
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-}
+// --- Legacy API for backward compatibility ---
 
-func uint32ToIP(u uint32) net.IP {
-	return net.IPv4(byte(u>>24), byte(u>>16), byte(u>>8), byte(u))
+// Options is an alias for TCPOptions for backward compatibility.
+type Options = TCPOptions
+
+// Discover is a convenience function that wraps TCPDiscovery for backward compatibility.
+func Discover(ctx context.Context, cidr string, opts Options) ([]net.IP, error) {
+	t := &TCPDiscovery{Options: opts}
+	return t.Discover(ctx, cidr)
 }

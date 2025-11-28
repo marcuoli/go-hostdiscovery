@@ -1,101 +1,246 @@
 # go-hostdiscovery
 
-A simple, fast host discovery tool written in Go. It performs a TCP connect sweep over a CIDR and reports IPs that accept a connection on any of the specified ports. This works without admin privileges or raw sockets, making it suitable for Windows, macOS, and Linux.
+A comprehensive, multi-protocol host and hostname discovery library for Go. Discover live hosts and resolve their hostnames using various protocols - all without admin privileges or raw sockets.
 
-## Usage
+## Features
 
-Build the binary and run:
+| Protocol | Port | Best For | Platforms |
+|----------|------|----------|-----------|
+| **TCP Connect** | Various | Host discovery | All |
+| **Reverse DNS** | 53 | Standard hostname lookup | All |
+| **NetBIOS** | UDP/137 | Windows hostnames | 🔵 Windows |
+| **mDNS** | UDP/5353 | Apple/Linux/IoT devices | 🍎 macOS, 🟢 Linux, 🟠 Android, 🔶 IoT |
+| **LLMNR** | UDP/5355 | Windows/Linux local names | 🔵 Windows, 🟢 Linux |
+| **SSDP/UPnP** | UDP/1900 | Smart devices, media players | 🔶 IoT, 📺 TVs, 🎮 Consoles |
 
-```bash
-# Build
-go build -o bin/hostdiscovery ./cmd/hostdiscovery
+### Platform Discovery Matrix
 
-# Scan common ports on a /24 range
-./bin/hostdiscovery -cidr 192.168.1.0/24
+| Platform | Recommended Protocols |
+|----------|----------------------|
+| 🔵 **Windows** | NetBIOS, LLMNR, mDNS, DNS |
+| 🟢 **Linux** | mDNS (Avahi), LLMNR (systemd-resolved), DNS |
+| 🍎 **macOS** | mDNS (Bonjour), DNS |
+| 🟠 **Android** | mDNS, SSDP, LLMNR |
+| 🔶 **IoT Devices** | mDNS, SSDP/UPnP |
 
-# Customize ports, timeout and workers
-./bin/hostdiscovery -cidr 10.0.0.0/24 -ports 80,443,22 -timeout 1s -workers 512
-```
-
-## Library usage
-
-Import the package and call `Discover`:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"time"
-
-	hd "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
-)
-
-func main() {
-	opts := hd.Options{Ports: []int{80, 443, 22}, Timeout: 800 * time.Millisecond, Workers: 256}
-	ips, err := hd.Discover(context.Background(), "192.168.1.0/24", opts)
-	if err != nil {
-		panic(err)
-	}
-	for _, ip := range ips {
-		fmt.Println(ip.String())
-	}
-}
-```
-
-Get the module:
+## Installation
 
 ```bash
 go get github.com/marcuoli/go-hostdiscovery
 ```
 
-### NetBIOS hostname discovery
+## Quick Start
 
-Use the NetBIOS discovery helper to resolve hostnames via NBSTAT (UDP/137):
+### Multi-Protocol Discovery (Recommended)
+
+Discover hosts and resolve hostnames using all available protocols:
 
 ```go
 package main
 
 import (
-	"context"
-	"fmt"
-	hd "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
+    "context"
+    "fmt"
+    "time"
+
+    hd "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery"
 )
 
 func main() {
-	nb := hd.NewNetBIOSDiscovery()
-	res, err := nb.LookupAddr(context.Background(), "192.168.1.50")
-	if err != nil { panic(err) }
-	fmt.Println("Hostname:", res.Hostname)
-	fmt.Println("MAC:", res.MACAddress)
-	for _, n := range res.Names {
-		fmt.Printf("%-15s <%.2X> group=%v active=%v (%s)\n", n.Name, n.Suffix, n.IsGroup, n.IsActive, n.Type)
-	}
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    // Create multi-protocol discovery with all methods enabled
+    discovery := hd.NewMultiDiscovery()
+    
+    // Discover all hosts in CIDR and resolve their hostnames
+    results, err := discovery.DiscoverCIDR(ctx, "192.168.1.0/24")
+    if err != nil {
+        panic(err)
+    }
+
+    for _, host := range results {
+        hostname := host.PrimaryHostname()
+        if hostname == "" {
+            hostname = "(unknown)"
+        }
+        fmt.Printf("%-15s  %s\n", host.IP, hostname)
+        
+        // Show all discovered hostnames by protocol
+        for method, name := range host.Hostnames {
+            fmt.Printf("    [%s] %s\n", method, name)
+        }
+    }
+
+    // Also discover SSDP devices (smart TVs, IoT, etc.)
+    ssdpDevices, _ := discovery.DiscoverSSDP(ctx)
+    for _, dev := range ssdpDevices {
+        fmt.Printf("SSDP: %s - %s (%s)\n", dev.IP, dev.Server, dev.ST)
+    }
 }
 ```
 
-Notes:
-- Requires UDP reachability to port 137 on the target.
-- Works best on Windows networks with NetBIOS enabled.
-- Timeout defaults to 2s; adjust via `NetBIOSDiscovery{Timeout: ...}` if needed.
+## Individual Protocol Usage
 
-Flags:
-- `-cidr`: CIDR to scan (required), e.g., `192.168.1.0/24`.
-- `-ports`: Comma-separated TCP ports to probe. Default: `80,443,22,3389`.
-- `-timeout`: Per-port dial timeout. Default: `800ms`.
-- `-workers`: Concurrent workers. Default: `256`.
-- `-v`: Verbose output (reserved for future use).
+### TCP Host Discovery
 
-## Notes
-- This is a host discovery sweep (not a full port scan). A host is considered up if any listed port accepts a TCP connection within the timeout.
-- ICMP/ARP discovery would require elevated privileges on many systems. TCP connect works unprivileged.
-- Large CIDRs can produce significant traffic. Use responsibly and only on networks you own or have permission to scan.
+Find live hosts by TCP connect scanning:
 
-## Development
+```go
+tcp := hd.NewTCPDiscovery()
+tcp.Options.Ports = []int{80, 443, 22, 3389, 445}
+tcp.Options.Timeout = 800 * time.Millisecond
+tcp.Options.Workers = 256
+
+ips, err := tcp.Discover(ctx, "192.168.1.0/24")
+for _, ip := range ips {
+    fmt.Println(ip.String())
+}
+```
+
+### Reverse DNS Lookup
+
+Standard PTR record lookups:
+
+```go
+dns := hd.NewDNSDiscovery()
+result, err := dns.LookupAddr(ctx, "8.8.8.8")
+fmt.Println("Hostname:", result.Hostname) // dns.google
+
+// Batch lookup
+results := dns.LookupMultiple(ctx, []string{"8.8.8.8", "1.1.1.1"})
+```
+
+### NetBIOS Discovery (Windows)
+
+Resolve Windows hostnames via NBSTAT:
+
+```go
+nb := hd.NewNetBIOSDiscovery()
+result, err := nb.LookupAddr(ctx, "192.168.1.50")
+fmt.Println("Hostname:", result.Hostname)
+fmt.Println("MAC:", result.MACAddress)
+
+for _, name := range result.Names {
+    fmt.Printf("  %-15s <%.2X> %s\n", name.Name, name.Suffix, name.Type)
+}
+```
+
+### mDNS Discovery (Apple/Linux/IoT)
+
+Discover devices using Multicast DNS (Bonjour/Avahi):
+
+```go
+mdns := hd.NewMDNSDiscovery()
+
+// Lookup specific IP
+result, _ := mdns.LookupAddr(ctx, "192.168.1.100")
+fmt.Println("Hostname:", result.Hostname) // e.g., "macbook.local"
+
+// Browse for services
+services, _ := mdns.BrowseServices(ctx, "_http._tcp")
+for _, svc := range services {
+    fmt.Printf("Service: %s\n", svc.Instance)
+}
+```
+
+Common mDNS service types:
+- `_http._tcp` - Web servers
+- `_ssh._tcp` - SSH servers
+- `_printer._tcp` - Printers
+- `_airplay._tcp` - AirPlay devices
+- `_googlecast._tcp` - Chromecast
+- `_smb._tcp` - SMB/Windows shares
+- `_homekit._tcp` - HomeKit devices
+
+### LLMNR Discovery (Windows/Linux)
+
+Link-Local Multicast Name Resolution:
+
+```go
+llmnr := hd.NewLLMNRDiscovery()
+
+// Reverse lookup
+result, _ := llmnr.LookupAddr(ctx, "192.168.1.50")
+fmt.Println("Hostname:", result.Hostname)
+
+// Forward lookup (resolve name to IP)
+ips, _ := llmnr.LookupName(ctx, "DESKTOP-ABC123")
+for _, ip := range ips {
+    fmt.Println("IP:", ip)
+}
+```
+
+### SSDP/UPnP Discovery (IoT/Media)
+
+Discover smart devices, media players, and IoT:
+
+```go
+ssdp := hd.NewSSDPDiscovery()
+
+// Discover all devices
+devices, _ := ssdp.Discover(ctx, "ssdp:all")
+for _, dev := range devices {
+    fmt.Printf("%s - %s\n", dev.IP, dev.Server)
+    fmt.Printf("  Location: %s\n", dev.Location)
+    fmt.Printf("  Type: %s\n", dev.ST)
+}
+
+// Get friendly name from device description
+if dev.Location != "" {
+    name, _ := ssdp.GetDeviceInfo(ctx, dev.Location)
+    fmt.Println("Friendly Name:", name)
+}
+```
+
+SSDP search targets:
+- `ssdp:all` - All devices
+- `upnp:rootdevice` - Root devices only
+- `urn:schemas-upnp-org:device:MediaRenderer:1` - Media renderers
+- `urn:dial-multiscreen-org:service:dial:1` - DIAL/Chromecast
+
+## CLI Usage
 
 ```bash
-# Lint and test (if you add tests)
-go vet ./...
-go test ./...
+# Build
+go build -o bin/hostdiscovery ./cmd/hostdiscovery
+
+# Basic TCP scan
+./hostdiscovery -cidr 192.168.1.0/24
+
+# Custom ports and timeout
+./hostdiscovery -cidr 10.0.0.0/24 -ports 80,443,22,445 -timeout 1s -workers 512
 ```
+
+Flags:
+- `-cidr`: CIDR to scan (required)
+- `-ports`: Comma-separated TCP ports (default: `80,443,22,3389`)
+- `-timeout`: Per-connection timeout (default: `800ms`)
+- `-workers`: Concurrent workers (default: `256`)
+
+## Package Structure
+
+```
+pkg/hostdiscovery/
+├── types.go          # Common types and constants
+├── ip.go             # IP enumeration utilities
+├── hostdiscovery.go  # TCP connect discovery
+├── dns.go            # Reverse DNS (PTR) lookups
+├── netbios.go        # NetBIOS NBSTAT lookups
+├── mdns.go           # mDNS/Bonjour discovery
+├── llmnr.go          # LLMNR discovery
+├── ssdp.go           # SSDP/UPnP discovery
+└── multi.go          # Unified multi-protocol discovery
+```
+
+## Notes
+
+- **No privileges required**: All protocols work without admin/root access
+- **Cross-platform**: Works on Windows, macOS, and Linux
+- **Network considerations**: Large CIDRs produce significant traffic
+- **Firewall awareness**: Some protocols may be blocked by firewalls
+- **Legal**: Only scan networks you own or have permission to scan
+
+## License
+
+MIT
