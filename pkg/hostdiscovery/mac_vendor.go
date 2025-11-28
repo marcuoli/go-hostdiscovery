@@ -49,7 +49,7 @@ func SetOUIDatabase(path string) error {
 	ouiDB = nil
 	ouiDBErr = nil
 
-	debugLog("vendor", "Custom OUI database path set: %s", path)
+	debugLog(MethodVendor, "Custom OUI database path set: %s", path)
 	return nil
 }
 
@@ -69,24 +69,24 @@ func initOUIDB() error {
 
 		if path != "" {
 			// Load from custom file
-			debugLog("vendor", "Loading OUI database from: %s", path)
+			debugLog(MethodVendor, "Loading OUI database from: %s", path)
 			db, err := oui.OpenFile(path)
 			if err != nil {
 				ouiDBErr = fmt.Errorf("failed to open OUI database: %w", err)
 				return
 			}
 			ouiDB = db
-			debugLog("vendor", "OUI database loaded successfully from custom path")
+			debugLog(MethodVendor, "OUI database loaded successfully from custom path")
 		} else {
 			// Use embedded static database
-			debugLog("vendor", "Loading embedded OUI database")
+			debugLog(MethodVendor, "Loading embedded OUI database")
 			db, err := oui.OpenStaticFile("")
 			if err != nil {
 				ouiDBErr = fmt.Errorf("failed to load embedded OUI database: %w", err)
 				return
 			}
 			ouiDB = db
-			debugLog("vendor", "Embedded OUI database loaded successfully")
+			debugLog(MethodVendor, "Embedded OUI database loaded successfully")
 		}
 	})
 	return ouiDBErr
@@ -115,7 +115,7 @@ func LookupVendor(mac string) (*VendorInfo, error) {
 	entry, err := ouiDB.Query(hwAddr.String())
 	if err != nil {
 		if err == oui.ErrNotFound {
-			debugLogVerbose("vendor", "%s: vendor not found in database", mac)
+			debugLogVerbose(MethodVendor, "%s: vendor not found in database", mac)
 			return nil, nil // Not found is not an error, just unknown vendor
 		}
 		return nil, fmt.Errorf("OUI lookup failed: %w", err)
@@ -133,7 +133,7 @@ func LookupVendor(mac string) (*VendorInfo, error) {
 		vendor.Country = entry.Country
 	}
 
-	debugLogVerbose("vendor", "%s -> %s", mac, vendor.Manufacturer)
+	debugLogVerbose(MethodVendor, "%s -> %s", mac, vendor.Manufacturer)
 	return vendor, nil
 }
 
@@ -181,7 +181,7 @@ func ReloadOUIDatabase() error {
 	ouiDBErr = nil
 	ouiDBMu.Unlock()
 
-	debugLog("vendor", "OUI database reload triggered")
+	debugLog(MethodVendor, "OUI database reload triggered")
 	return initOUIDB()
 }
 

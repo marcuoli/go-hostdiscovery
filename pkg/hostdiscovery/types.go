@@ -28,6 +28,7 @@ const (
 	MethodDHCP    DiscoveryMethod = "dhcp"   // DHCP hostname (via DNS or direct)
 	MethodFinger  DiscoveryMethod = "finger" // Finger Protocol (RFC 1288)
 	MethodARP     DiscoveryMethod = "arp"    // ARP for MAC address discovery
+	MethodVendor  DiscoveryMethod = "vendor" // MAC vendor lookup (OUI)
 )
 
 // HostInfo contains consolidated information about a discovered host.
