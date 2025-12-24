@@ -5,7 +5,7 @@
 //   - Android
 //   - IoT devices (Chromecast, smart home devices, printers)
 //
-// Uses github.com/miekg/dns for proper DNS packet handling.
+// Uses codeberg.org/miekg/dns for proper DNS packet handling.
 package mdns
 
 import (
@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 )
 
 const (
@@ -107,15 +107,15 @@ func (m *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) 
 
 // queryMulticast sends an mDNS query to the multicast address and filters responses by IP.
 func (m *Discovery) queryMulticast(ctx context.Context, reverseName string, targetIP net.IP) string {
-	// Create PTR query message using miekg/dns
+	// Create PTR query message
 	msg := new(dns.Msg)
-	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.Question = append(msg.Question, &dns.PTR{Hdr: dns.Header{Name: reverseName, Class: dns.ClassINET}})
 	msg.RecursionDesired = false // mDNS doesn't use recursion
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return ""
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -163,13 +163,13 @@ func (m *Discovery) queryMulticast(ctx context.Context, reverseName string, targ
 // queryUnicast sends an mDNS query directly to the target host.
 func (m *Discovery) queryUnicast(ctx context.Context, reverseName string, targetIP net.IP) string {
 	msg := new(dns.Msg)
-	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.Question = append(msg.Question, &dns.PTR{Hdr: dns.Header{Name: reverseName, Class: dns.ClassINET}})
 	msg.RecursionDesired = false
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return ""
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -200,8 +200,8 @@ func (m *Discovery) queryUnicast(ctx context.Context, reverseName string, target
 
 // parsePTRResponse parses an mDNS PTR response using miekg/dns.
 func (m *Discovery) parsePTRResponse(data []byte) string {
-	msg := new(dns.Msg)
-	if err := msg.Unpack(data); err != nil {
+	msg := &dns.Msg{Data: data}
+	if err := msg.Unpack(); err != nil {
 		return ""
 	}
 
@@ -239,13 +239,13 @@ func (m *Discovery) BrowseServices(ctx context.Context, serviceType string) ([]S
 	}
 
 	msg := new(dns.Msg)
-	msg.SetQuestion(serviceType, dns.TypePTR)
+	msg.Question = append(msg.Question, &dns.PTR{Hdr: dns.Header{Name: serviceType, Class: dns.ClassINET}})
 	msg.RecursionDesired = false
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return nil, fmt.Errorf("pack query: %w", err)
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -274,8 +274,8 @@ func (m *Discovery) BrowseServices(ctx context.Context, serviceType string) ([]S
 			break // Timeout or error
 		}
 
-		respMsg := new(dns.Msg)
-		if err := respMsg.Unpack(buf[:n]); err != nil {
+		respMsg := &dns.Msg{Data: buf[:n]}
+		if err := respMsg.Unpack(); err != nil {
 			continue
 		}
 

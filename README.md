@@ -605,7 +605,7 @@ Configuration variables:
 - `github.com/j-keck/arping` - ARP functionality
 - `github.com/klauspost/oui` - MAC vendor lookups
 - `github.com/koron/go-ssdp` - SSDP protocol implementation
-- `github.com/miekg/dns` - DNS operations
+- `codeberg.org/miekg/dns` - DNS operations
 
 All dependencies are production-quality and actively maintained.
 

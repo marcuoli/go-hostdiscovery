@@ -5,6 +5,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 func TestNewDiscovery(t *testing.T) {
@@ -145,6 +148,32 @@ func TestParsePTRResponse_Invalid(t *testing.T) {
 	hostname = d.parsePTRResponse([]byte{0x00, 0x01})
 	if hostname != "" {
 		t.Errorf("Expected empty hostname for short data, got %s", hostname)
+	}
+}
+
+func TestParsePTRResponse_ValidPTR(t *testing.T) {
+	d := NewDiscovery()
+
+	rr := &dns.PTR{
+		Hdr: dns.Header{
+			Name:   "100.1.168.192.in-addr.arpa.",
+			Class:  dns.ClassINET,
+			TTL:    120,
+		},
+		PTR: rdata.PTR{Ptr: "host.local."},
+	}
+
+	msg := &dns.Msg{
+		MsgHeader: dns.MsgHeader{Response: true},
+		Answer:    []dns.RR{rr},
+	}
+	if err := msg.Pack(); err != nil {
+		t.Fatalf("msg.Pack: %v", err)
+	}
+
+	hostname := d.parsePTRResponse(msg.Data)
+	if hostname != "host.local" {
+		t.Fatalf("expected hostname host.local, got %q", hostname)
 	}
 }
 

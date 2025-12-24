@@ -5,7 +5,7 @@
 //   - Some Android devices
 //
 // It resolves hostnames on the local network without a DNS server.
-// Uses github.com/miekg/dns for proper DNS packet handling.
+// Uses codeberg.org/miekg/dns for proper DNS packet handling.
 package llmnr
 
 import (
@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 )
 
 const (
@@ -99,13 +99,13 @@ func (l *Discovery) LookupAddr(ctx context.Context, ip string) (*Result, error) 
 func (l *Discovery) queryMulticastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
 	// Create PTR query message
 	msg := new(dns.Msg)
-	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.Question = append(msg.Question, &dns.PTR{Hdr: dns.Header{Name: reverseName, Class: dns.ClassINET}})
 	msg.RecursionDesired = false // LLMNR doesn't use recursion
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return ""
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -151,13 +151,13 @@ func (l *Discovery) queryMulticastPTR(ctx context.Context, reverseName string, t
 // queryUnicastPTR sends a PTR query directly to the target host.
 func (l *Discovery) queryUnicastPTR(ctx context.Context, reverseName string, targetIP net.IP) string {
 	msg := new(dns.Msg)
-	msg.SetQuestion(reverseName, dns.TypePTR)
+	msg.Question = append(msg.Question, &dns.PTR{Hdr: dns.Header{Name: reverseName, Class: dns.ClassINET}})
 	msg.RecursionDesired = false
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return ""
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -187,8 +187,8 @@ func (l *Discovery) queryUnicastPTR(ctx context.Context, reverseName string, tar
 
 // parsePTRResponse parses an LLMNR PTR response using miekg/dns.
 func (l *Discovery) parsePTRResponse(data []byte) string {
-	msg := new(dns.Msg)
-	if err := msg.Unpack(data); err != nil {
+	msg := &dns.Msg{Data: data}
+	if err := msg.Unpack(); err != nil {
 		return ""
 	}
 
@@ -220,13 +220,13 @@ func (l *Discovery) LookupName(ctx context.Context, name string) ([]net.IP, erro
 	}
 
 	msg := new(dns.Msg)
-	msg.SetQuestion(name, dns.TypeA)
+	msg.Question = append(msg.Question, &dns.A{Hdr: dns.Header{Name: name, Class: dns.ClassINET}})
 	msg.RecursionDesired = false
 
-	data, err := msg.Pack()
-	if err != nil {
+	if err := msg.Pack(); err != nil {
 		return nil, fmt.Errorf("pack query: %w", err)
 	}
+	data := msg.Data
 
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -253,8 +253,8 @@ func (l *Discovery) LookupName(ctx context.Context, name string) ([]net.IP, erro
 			break
 		}
 
-		respMsg := new(dns.Msg)
-		if err := respMsg.Unpack(buf[:n]); err != nil {
+		respMsg := &dns.Msg{Data: buf[:n]}
+		if err := respMsg.Unpack(); err != nil {
 			continue
 		}
 
@@ -264,7 +264,7 @@ func (l *Discovery) LookupName(ctx context.Context, name string) ([]net.IP, erro
 
 		for _, rr := range respMsg.Answer {
 			if a, ok := rr.(*dns.A); ok {
-				ips = append(ips, a.A)
+				ips = append(ips, net.IP(a.Addr.AsSlice()))
 			}
 		}
 	}
