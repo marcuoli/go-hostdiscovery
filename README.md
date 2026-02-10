@@ -8,7 +8,7 @@
 
 A comprehensive, multi-protocol host discovery and operating system detection library for Go. Discover live hosts, resolve hostnames, detect operating systems, and identify devices across your network using 9+ protocols—all without requiring administrative privileges or raw sockets.
 
-**Version:** 1.3.1 | **Go:** 1.25.4+
+**Version:** 1.3.1 | **Go:** 1.25.7+
 
 ## 🎯 Why go-hostdiscovery?
 
@@ -93,7 +93,7 @@ Multi-Discovery Orchestrator
 go get github.com/marcuoli/go-hostdiscovery
 ```
 
-Minimum Go version: **1.25.4**
+Minimum Go version: **1.25.7**
 
 ## 🚀 Quick Start
 
