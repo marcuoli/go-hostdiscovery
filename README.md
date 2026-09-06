@@ -8,7 +8,7 @@
 
 A comprehensive, multi-protocol host discovery and operating system detection library for Go. Discover live hosts, resolve hostnames, detect operating systems, and identify devices across your network using 9+ protocols—all without requiring administrative privileges or raw sockets.
 
-**Version:** 1.3.1 | **Go:** 1.25.7+
+**Version:** 1.5.2 | **Go:** 1.27.1+
 
 ## 🎯 Why go-hostdiscovery?
 
@@ -93,7 +93,19 @@ Multi-Discovery Orchestrator
 go get github.com/marcuoli/go-hostdiscovery
 ```
 
-Minimum Go version: **1.25.7**
+Minimum Go version: **1.27.1**
+
+## Build with WSLC
+
+On Windows, the default build runs in the Go version declared by `go.mod` and writes the Linux executable to `bin/hostdiscovery`:
+
+```powershell
+make build
+# Or run the wrapper directly:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-wslc.ps1
+```
+
+This requires WSLC 2.9.3 or newer.
 
 ## 🚀 Quick Start
 
