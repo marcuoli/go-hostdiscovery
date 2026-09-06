@@ -4,16 +4,16 @@ package hostdiscovery
 // Version information for the hostdiscovery library.
 const (
 	// Version is the semantic version of the library.
-	Version = "0.9.9"
+	Version = "1.5.2"
 
 	// VersionMajor is the major version number.
-	VersionMajor = 0
+	VersionMajor = 1
 
 	// VersionMinor is the minor version number.
-	VersionMinor = 9
+	VersionMinor = 5
 
 	// VersionPatch is the patch version number.
-	VersionPatch = 9
+	VersionPatch = 2
 )
 
 // VersionInfo returns the full version string with library name.
