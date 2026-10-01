@@ -8,7 +8,7 @@
 
 A comprehensive, multi-protocol host discovery and operating system detection library for Go. Discover live hosts, resolve hostnames, detect operating systems, and identify devices across your network using 9+ protocols—all without requiring administrative privileges or raw sockets.
 
-**Version:** 1.5.2 | **Go:** 1.27.1+
+**Version:** 1.6.0 | **Go:** 1.27.1+
 
 ## 🎯 Why go-hostdiscovery?
 
@@ -191,6 +191,39 @@ for _, dev := range devices {
 ## 🔍 Individual Protocol Usage
 
 ### TCP Host Discovery
+
+For a single endpoint, import the TCP-only subpackage. It uses only the standard
+library and returns the original open socket for an application handshake:
+
+```go
+import (
+    "context"
+    "net"
+    "time"
+
+    tcp "github.com/marcuoli/go-hostdiscovery/pkg/hostdiscovery/tcp"
+)
+
+ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+defer cancel()
+conn, result, err := tcp.DialContext(ctx, &net.Dialer{}, "tcp", "db.example:1521")
+if err != nil {
+    // result.Status distinguishes refusal, timeout, DNS failure, unreachable
+    // routes/hosts, cancellation and unclassified failures. err is unchanged.
+    return
+}
+defer conn.Close()
+// Continue the application protocol through conn; no second dial is needed.
+// result.Elapsed is measured time. LocalAddress/RemoteAddress describe the socket.
+_ = result
+```
+
+`DialContext` accepts `tcp`, `tcp4` and `tcp6`, preserves the supplied dialer and
+context settings, and adds no retry, port scan or ICMP check. DNS resolution and
+address selection remain with `net.Dialer`. A timeout means no timely response,
+not proof that the host is down. A connected TCP port does not prove application
+authentication or database readiness. The existing CIDR discovery API below is
+unchanged.
 
 Find live hosts via TCP connection scanning:
 
