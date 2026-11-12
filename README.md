@@ -4,11 +4,12 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/marcuoli/go-hostdiscovery)](https://goreportcard.com/report/github.com/marcuoli/go-hostdiscovery)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/marcuoli/go-hostdiscovery)](https://github.com/marcuoli/go-hostdiscovery/releases)
-[![Tests](https://github.com/marcuoli/go-hostdiscovery/actions/workflows/test.yml/badge.svg)](https://github.com/marcuoli/go-hostdiscovery/actions/workflows/test.yml)
+[![Module/build Go 1.27.4](https://img.shields.io/badge/module%2Fbuild-Go%201.27.4-00ADD8.svg)](https://go.dev/dl/)
+[![Source compatibility Go 1.27.0](https://img.shields.io/badge/source%20compatibility-Go%201.27.0-00ADD8.svg)](#go-compatibility)
 
 A comprehensive, multi-protocol host discovery and operating system detection library for Go. Discover live hosts, resolve hostnames, detect operating systems, and identify devices across your network using 9+ protocols—all without requiring administrative privileges or raw sockets.
 
-**Version:** 1.6.0 | **Go:** 1.27.1+
+**Version:** 1.6.0 | **Module/build Go:** 1.27.4
 
 ## 🎯 Why go-hostdiscovery?
 
@@ -93,11 +94,35 @@ Multi-Discovery Orchestrator
 go get github.com/marcuoli/go-hostdiscovery
 ```
 
-Minimum Go version: **1.27.1**
+Module/build requirement: **Go 1.27.4**.
+
+### Go compatibility
+
+| Meaning | Go version |
+|---------|------------|
+| Declared module requirement (`go.mod`) | **1.27.4** |
+| Current build compiler | **1.27.4** |
+| Verified source compatibility, including selected dependencies and tests | **1.27.0** |
+
+Source compatibility is checked separately from installation of the unchanged
+module. Exact Go 1.27.0 builds, tests and vet pass on Windows/amd64 (CGO disabled)
+and Linux/amd64 (CGO enabled) using isolated source snapshots with only the `go`
+directive lowered; application source, dependencies and checksums are unchanged.
+The shipping module still requires Go 1.27.4.
+
+The boundary is the unmodified `codeberg.org/miekg/dns` v0.6.132 module's Go 1.27.0
+requirement, also identified by Mingo v0.18.0. In an otherwise identical probe,
+Go 1.26.11 rejects that dependency even after lowering the probe's own directive.
+This establishes a dependency requirement boundary, not a language-level compiler
+failure. Network tests requiring private local configuration are skipped; these
+checks do not qualify native macOS/BSD or every network environment. Checked
+2026-11-12.
 
 ## Build with WSLC
 
-On Windows, the default build runs in the Go version declared by `go.mod` and writes the Linux executable to `bin/hostdiscovery`:
+On Windows, the default build uses the exact Go version declared by `go.mod`
+in a Linux container with CGO enabled and writes the executable to
+`V:\Development\go-hostdiscovery\artifacts\bin\hostdiscovery`:
 
 ```powershell
 make build
@@ -105,7 +130,14 @@ make build
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-wslc.ps1
 ```
 
-This requires WSLC 2.9.3 or newer.
+This requires WSLC 2.9.3 or newer and the V: development volume. Source is mounted
+read-only; caches and temporary files stay under the project's V: directories.
+
+On POSIX hosts, `make build` uses Go 1.27.4 with CGO enabled and defaults to
+`/mnt/v/Development/go-hostdiscovery` for outputs and caches. Set
+`PROJECT_OUTPUT_ROOT` to the project directory on the mounted development volume
+if its mount point differs. `make test` and `make vet` use the same compiler and
+storage settings.
 
 ## 🚀 Quick Start
 
